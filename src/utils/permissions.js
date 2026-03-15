@@ -1,3 +1,4 @@
+import { getCurrentUser } from "./auth";
 export const PERMISSIONS = {
   // Account
   CHANGE_PASSWORD: "change_password",
@@ -67,18 +68,14 @@ export const PERMISSION_UI = [
   },
 ];
 
-export const getCurrentUser = () => {
-  try {
-    return JSON.parse(localStorage.getItem("currentUser"));
-  } catch {
-    return null;
-  }
-};
-
 export const hasPermission = (permissionCode) => {
   const u = getCurrentUser();
   if (!u) return false;
+
+  if (u.role === "admin") return true;
+
   const perms = Array.isArray(u.permissions) ? u.permissions : [];
   if (perms.includes(PERMISSIONS.FULL_ACCESS)) return true;
+
   return perms.includes(permissionCode);
 };

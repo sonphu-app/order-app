@@ -6,7 +6,7 @@ import SearchBar from "../components/SearchBar";
 import FilterBar from "../components/FilterBar";
 import BottomNav from "../components/BottomNav";
 import { hasPermission, PERMISSIONS } from "../utils/permissions";
-
+import { getCurrentUser } from "../utils/auth";
 function formatTime(date) {
   const d = new Date(date);
   const hh = String(d.getHours()).padStart(2, "0");
@@ -93,6 +93,8 @@ export default function Home() {
   ...row,
   createdAt: row.created_at,
   lastActionAt: row.updated_at,
+  requiredUsers: row.required_users || [],
+  understoodBy: row.understood_by || [],
 });
 
   // ✅ LOAD từ Supabase (CHỈ SELECT, KHÔNG UPDATE Ở ĐÂY)
@@ -107,17 +109,52 @@ export default function Home() {
       return;
     }
 
-    const rows = (data || []).map(normalizeOrder);
+    let rows = (data || []).map(normalizeOrder);
 
-    // tạo weekly task ở client (thứ 3 7h)
-    setOrders(rows);
+// tạo weekly task ở client nếu đã qua mốc và chưa có
+const created = await ensureWeeklySystemTask(rows);
+
+if (created) {
+  const { data: reloadData, error: reloadError } = await supabase
+    .from("orders")
+    .select("*")
+    .order("updated_at", { ascending: false });
+
+  if (reloadError) {
+    console.log("RELOAD ORDERS ERROR:", reloadError);
+    return;
+  }
+
+  rows = (reloadData || []).map(normalizeOrder);
+}
+
+setOrders(rows);
 
   };
 
   useEffect(() => {
     loadOrdersSupabase();
   }, []);
+useEffect(() => {
+  const channel = supabase
+    .channel("orders-realtime")
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "orders",
+      },
+      () => {
+        loadOrdersSupabase();
+      }
+    )
+    .subscribe();
 
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}, []);
   // ===== LỌC THEO THỜI GIAN =====
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -197,10 +234,12 @@ const updateOrder = async (id, action) => {
   if (action === "completed") updateData.status = "completed";
 
   if (action === "ack" && current.type === "system_message") {
-    const me = JSON.parse(localStorage.getItem("currentUser") || "{}");
-    const old = Array.isArray(current.understood_by)
-      ? current.understood_by
-      : [];
+    const me = getCurrentUser() || {};
+    const old = Array.isArray(current.understoodBy)
+  ? current.understoodBy
+  : Array.isArray(current.understood_by)
+  ? current.understood_by
+  : [];
 
     if (me?.id && !old.includes(me.id)) {
       updateData.understood_by = [...old, me.id];
@@ -249,7 +288,7 @@ const updateOrder = async (id, action) => {
 
       if (el.scrollHeight > maxHeight + 2) setShowToggle(true);
       else setShowToggle(false);
-    }, [o.title, o.text]);
+    }, [o.title, o.content]);
 
     return (
       <div
@@ -355,14 +394,14 @@ const updateOrder = async (id, action) => {
                     <Btn onClick={() => updateOrder(o.id, "ack")}>👁 Đã hiểu</Btn>
                   )}
 
-                  {o.requiredUsers && (
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      Chưa hiểu:{" "}
-                      {(o.required_users || [])
-                        .filter((u) => !(o.understood_by || []).includes(u))
-                        .join(", ")}
-                    </div>
-                  )}
+                  {o.requiredUsers?.length > 0 && (
+  <div style={{ fontSize: 12, opacity: 0.8 }}>
+    Chưa hiểu:{" "}
+    {o.requiredUsers
+      .filter((u) => !(o.understoodBy || []).includes(u))
+      .join(", ")}
+  </div>
+)}
                 </>
               )}
 

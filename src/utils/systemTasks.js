@@ -17,9 +17,11 @@ function shouldCreateWeeklyTask(now = new Date()) {
 }
 
 function getWeekKey(now = new Date()) {
-  // key theo tuần để không tạo trùng
-  // đơn giản: YYYY-W + ceil(day/7)
-  return `${now.getFullYear()}-W${Math.ceil(now.getDate() / 7)}`;
+  const tue = getThisWeekTuesday7AM(now);
+  const y = tue.getFullYear();
+  const m = String(tue.getMonth() + 1).padStart(2, "0");
+  const d = String(tue.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 // ✅ tạo 1 order hệ thống dạng "nhiệm vụ"
@@ -66,11 +68,10 @@ export async function ensureWeeklySystemTask(rows = []) {
   const now = new Date();
 
   // chỉ thứ 3 lúc 7:00
-  if (now.getDay() !== 2) return null;
-  if (now.getHours() !== 7) return null;
+  if (!shouldCreateWeeklyTask(now)) return null;
 
   // key theo tuần (giữ logic cũ của bạn)
-  const weekKey = `${now.getFullYear()}-W${Math.ceil(now.getDate() / 7)}`;
+  const weekKey = getWeekKey(now);
 
   // nếu Home đã load rows từ DB thì check ngay trên rows cho nhanh
   const existsLocal = Array.isArray(rows) && rows.some(
@@ -90,8 +91,12 @@ export async function ensureWeeklySystemTask(rows = []) {
     .eq("system_key", weekKey)
     .limit(1);
 
-  if (!findErr && existing && existing.length > 0) return null;
+if (findErr) {
+  console.log("ensureWeeklySystemTask find error:", findErr);
+  return null;
+}
 
+if (existing && existing.length > 0) return null;const nowIso = new Date().toISOString();
   const { error: insErr } = await supabase.from("orders").insert({
     type: "system_task",
     title: "KIỂM TRA CÂN ĐIỆN TỬ",
@@ -104,6 +109,8 @@ export async function ensureWeeklySystemTask(rows = []) {
     // Nếu DB chưa có thì BỎ 2 dòng dưới (xem ghi chú ngay dưới)
     system_key: weekKey,
     kind: "weekly-scale-check",
+created_at: nowIso,
+updated_at: nowIso,
   });
 
   if (insErr) console.log("ensureWeeklySystemTask insert error:", insErr);

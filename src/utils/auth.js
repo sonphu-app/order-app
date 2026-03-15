@@ -15,16 +15,16 @@ export async function initDefaultAdmin() {
   if (data && data.length > 0) return;
 
   const { error } = await supabase.from("users").insert([
-  {
-    id: uuid(),
-    name: "Quản trị",
-    username: "admin",
-    password: "123456",
-role: "admin",
-    permissions: [],
-    created_at: new Date().toISOString(),
-  },
-]);
+    {
+      id: uuid(),
+      name: "Quản trị",
+      username: "admin",
+      password: "123456",
+      role: "admin",
+      permissions: [PERMISSIONS.FULL_ACCESS],
+      created_at: new Date().toISOString(),
+    },
+  ]);
 
   if (error) console.log("INIT ADMIN ERROR:", error);
 }
@@ -104,4 +104,17 @@ export function setCurrentUser(user) {
 export async function getAllUserIds() {
   const users = await getUsers();
   return users.map((u) => u.id);
+}
+export async function deleteUserById(userId) {
+  const { error } = await supabase
+    .from("users")
+    .delete()
+    .eq("id", userId);
+
+  if (error) {
+    console.log("DELETE USER ERROR:", error);
+    return false;
+  }
+
+  return true;
 }

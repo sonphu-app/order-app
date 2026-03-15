@@ -8,26 +8,11 @@ import {
   setCurrentUser,
   logout,
   initDefaultAdmin,
+  deleteUserById,
 } from "../utils/auth";
-import { computeTodayStats } from "../utils/ordersAdapter";
 import { resetAllData } from "../utils/resetSystem";
 
 // helper
-const getOrders = () => {
-  return JSON.parse(localStorage.getItem("orders") || "[]");
-};
-const isToday = (dateStr) => {
-  if (!dateStr) return false;
-
-  const d = new Date(dateStr);
-  const today = new Date();
-
-  return (
-    d.getDate() === today.getDate() &&
-    d.getMonth() === today.getMonth() &&
-    d.getFullYear() === today.getFullYear()
-  );
-};
 
 const uid = () => crypto.randomUUID();
 
@@ -199,14 +184,6 @@ useEffect(() => {
     channel.unsubscribe(); // 👈 sửa ở đây
   };
 }, []);
-const orders = getOrders();
-
-const todayOrders = orders.filter((o) => isToday(o.createdAt));
-
-const newCount = todayOrders.filter(o => o.status === "new").length;
-const doneCount = todayOrders.filter(o => o.status === "da_xong").length;
-const deliveredCount = todayOrders.filter(o => o.status === "giao").length;
-const completedCount = todayOrders.filter(o => o.status === "hoan_thanh").length;
   // My account form
   const [myName, setMyName] = useState(currentUser?.name || "");
   const [oldPass, setOldPass] = useState("");
@@ -227,7 +204,12 @@ const completedCount = todayOrders.filter(o => o.status === "hoan_thanh").length
   const [editPerms, setEditPerms] = useState([]);
 
   // Stats
-  const [stats, setStats] = useState(() => computeTodayStats());
+  const [stats, setStats] = useState({
+  newCount: 0,
+  doneCount: 0,
+  deliveredCount: 0,
+  completedCount: 0,
+});
 
   // Reset confirm
   const [resetConfirmText, setResetConfirmText] = useState("");
@@ -244,13 +226,50 @@ const completedCount = todayOrders.filter(o => o.status === "hoan_thanh").length
   }, [selectedUserId]); // eslint-disable-line
 
   useEffect(() => {
-    // refresh stats when open page / user changes
-    setStats(computeTodayStats());
-  }, []);
+  loadOrderStats();
+}, []);
 
   const refreshUsers = async () => {
   const u = await getUsers();
   setUsers(u);
+};
+const loadOrderStats = async () => {
+  try {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+
+    const end = new Date();
+    end.setHours(23, 59, 59, 999);
+
+    const { data, error } = await supabase
+      .from("orders")
+      .select("status, created_at")
+      .gte("created_at", start.toISOString())
+      .lte("created_at", end.toISOString());
+
+    if (error) {
+      console.error(error);
+      return;
+    }
+
+    const nextStats = {
+      newCount: 0,
+      doneCount: 0,
+      deliveredCount: 0,
+      completedCount: 0,
+    };
+
+    data.forEach((o) => {
+      if (o.status === "new") nextStats.newCount++;
+      if (o.status === "done" || o.status === "da_xong") nextStats.doneCount++;
+      if (o.status === "delivered" || o.status === "giao") nextStats.deliveredCount++;
+      if (o.status === "completed" || o.status === "hoan_thanh") nextStats.completedCount++;
+    });
+
+    setStats(nextStats);
+  } catch (err) {
+    console.error(err);
+  }
 };
 
   const persistUsers = async (nextUsers) => {
@@ -355,9 +374,12 @@ await persistUsers(nextUsers);   // 👈 thêm dòng này
 
   if (!confirm(`Xoá tài khoản "${selectedUser.name}"?`)) return;
 
-  const nextUsers = users.filter((u) => u.id !== selectedUser.id);
-  await persistUsers(nextUsers);
-  setSelectedUserId(null);
+  const ok = await deleteUserById(selectedUser.id);
+if (!ok) return alert("Xóa tài khoản thất bại.");
+
+setSelectedUserId(null);
+await refreshUsers();
+alert("Đã xóa tài khoản.");
 };
 
   const onLogout = () => {
@@ -571,16 +593,16 @@ await persistUsers(nextUsers);   // 👈 thêm dòng này
   ) : (
     <>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <StatBox label="Đơn mới (hôm nay)" value={newCount} />
-        <StatBox label="Đơn đã xong (hôm nay)" value={doneCount} />
-        <StatBox label="Đơn giao (hôm nay)" value={deliveredCount} />
-        <StatBox label="Đơn hoàn thành (hôm nay)" value={completedCount} />
+        <StatBox label="Đơn mới (hôm nay)" value={stats.newCount} />
+        <StatBox label="Đơn đã xong (hôm nay)" value={stats.doneCount} />
+        <StatBox label="Đơn giao (hôm nay)" value={stats.deliveredCount} />
+        <StatBox label="Đơn hoàn thành (hôm nay)" value={stats.completedCount} />
       </div>
 
       <div style={{ marginTop: 10 }}>
         <button
           type="button"
-          onClick={() => setStats(computeTodayStats())}
+          onClick={loadOrderStats}
           style={btnMini()}
         >
           Làm mới thống kê
