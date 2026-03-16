@@ -253,11 +253,11 @@ const updateOrder = async (id, action) => {
   }
 
   if (action === "shipped") {
-    updateData = {
-      status: "delivered",
-      delivered_by_name: actorName,
-    };
-  }
+  updateData = {
+    status: current.status === "completed" ? "completed" : "delivered",
+    delivered_by_name: actorName,
+  };
+}
 
   if (action === "completed") {
     updateData = {
