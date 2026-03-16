@@ -74,18 +74,21 @@ if (editingOrder) {
 
   // 1️⃣ Update order (reset về new)
   const { error: updateError } = await supabase
-    .from("orders")
-    .update({
-  title: title.trim(),
-  content: content.trim(),
-  status: "new",
-  has_image: images.length > 0,
-  required_users:
-    editingOrder.type === "system_message"
-      ? (await supabase.from("users").select("id")).data?.map(u => u.id) || []
-      : [],
-})
-    .eq("id", editingOrder.id);
+  .from("orders")
+  .update({
+    title: title.trim(),
+    content: content.trim(),
+    status: "new",
+    has_image: images.length > 0,
+    done_by_name: "",
+    delivered_by_name: "",
+    completed_by_name: "",
+    required_users:
+      editingOrder.type === "system_message"
+        ? (await supabase.from("users").select("id")).data?.map(u => u.id) || []
+        : [],
+  })
+  .eq("id", editingOrder.id);
 
   if (updateError) {
     console.log(updateError);
@@ -171,8 +174,8 @@ const { data: orderData, error: orderError } = await supabase
   content: content.trim(),
   status: "new",
   pinned: type === "system_message",
-  created_by: me.id,
-  created_by_name: me.name,
+  created_by: me?.id || null,
+created_by_name: me?.name || me?.username || "Không rõ",
   has_image: images.length > 0,
   understood_by: [],
   required_users:

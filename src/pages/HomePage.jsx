@@ -96,6 +96,10 @@ console.log("HOME REALTIME VERSION 1");
   lastActionAt: row.updated_at,
   requiredUsers: row.required_users || [],
   understoodBy: row.understood_by || [],
+  doneByName: row.done_by_name || "",
+  deliveredByName: row.delivered_by_name || "",
+  completedByName: row.completed_by_name || "",
+  createdByName: row.created_by_name || "",
 });
 
   // ✅ LOAD từ Supabase (CHỈ SELECT, KHÔNG UPDATE Ở ĐÂY)
@@ -227,26 +231,54 @@ const updateOrder = async (id, action) => {
   const current = orders.find((o) => o.id === id);
   if (!current) return;
 
+  const me = getCurrentUser() || {};
+  const actorName = me?.name || me?.username || "Không rõ";
+
   let updateData = {};
 
-  if (action === "reset") updateData.status = "new";
-  if (action === "done") updateData.status = "done";
-  if (action === "shipped") updateData.status = "delivered";
-  if (action === "completed") updateData.status = "completed";
+  if (action === "reset") {
+    updateData = {
+      status: "new",
+      done_by_name: "",
+      delivered_by_name: "",
+      completed_by_name: "",
+    };
+  }
+
+  if (action === "done") {
+    updateData = {
+      status: "done",
+      done_by_name: actorName,
+    };
+  }
+
+  if (action === "shipped") {
+    updateData = {
+      status: "delivered",
+      delivered_by_name: actorName,
+    };
+  }
+
+  if (action === "completed") {
+    updateData = {
+      status: "completed",
+      completed_by_name: actorName,
+    };
+  }
 
   if (action === "ack" && current.type === "system_message") {
-    const me = getCurrentUser() || {};
     const old = Array.isArray(current.understoodBy)
-  ? current.understoodBy
-  : Array.isArray(current.understood_by)
-  ? current.understood_by
-  : [];
+      ? current.understoodBy
+      : Array.isArray(current.understood_by)
+      ? current.understood_by
+      : [];
 
     if (me?.id && !old.includes(me.id)) {
       updateData.understood_by = [...old, me.id];
     }
 
     updateData.status = "done";
+    updateData.done_by_name = actorName;
   }
 
   const { error } = await supabase
@@ -273,7 +305,7 @@ const updateOrder = async (id, action) => {
   }, [finalFiltered]);
 
   // ⭐ CARD COMPONENT
-  const Card = ({ o, children }) => {
+  const Card = ({ o, children, metaText }) => {
     const [expanded, setExpanded] = useState(false);
     const [showToggle, setShowToggle] = useState(false);
     const textRef = useRef(null);
@@ -364,8 +396,8 @@ const updateOrder = async (id, action) => {
           }}
         >
           <div style={{ fontSize: 12, opacity: 0.7 }}>
-            {formatTime(o.lastActionAt || o.createdAt)}
-          </div>
+  {metaText || formatTime(o.lastActionAt || o.createdAt)}
+</div>
 
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{children}</div>
         </div>
@@ -375,6 +407,35 @@ const updateOrder = async (id, action) => {
 
   const isNormal = (o) => !o.type || o.type === "normal";
   const isSystem = (o) => o.type === "system_task" || o.type === "system_message";
+const showInDone = (o) => {
+  if (!isNormal(o)) return o.status === "done";
+  return o.status === "done" || (o.status === "completed" && !o.deliveredByName);
+};
+
+const showInDelivered = (o) => {
+  if (!isNormal(o)) return false;
+  return o.status === "delivered";
+};
+
+const showInCompleted = (o) => {
+  return o.status === "completed";
+};
+
+const getMetaText = (o, section) => {
+  if (section === "new") {
+    return `${formatTime(o.createdAt || o.created_at)} • ${o.createdByName || "Không rõ"}`;
+  }
+  if (section === "done") {
+    return `${formatTime(o.lastActionAt || o.updated_at || o.createdAt)} • ${o.doneByName || "Không rõ"}`;
+  }
+  if (section === "delivered") {
+    return `${formatTime(o.lastActionAt || o.updated_at || o.createdAt)} • ${o.deliveredByName || "Không rõ"}`;
+  }
+  if (section === "completed") {
+    return `${formatTime(o.lastActionAt || o.updated_at || o.createdAt)} • ${o.completedByName || "Không rõ"}`;
+  }
+  return formatTime(o.lastActionAt || o.createdAt);
+};
 
   return (
     <div style={S.app}>
@@ -385,9 +446,9 @@ const updateOrder = async (id, action) => {
       {/* 🔴 ĐƠN MỚI */}
       <div style={S.section}>Đơn mới</div>
       {sorted
-        .filter((o) => o.status === "new")
-        .map((o) => (
-          <Card key={o.id} o={o}>
+  .filter((o) => o.status === "new")
+  .map((o) => (
+    <Card key={o.id} o={o} metaText={getMetaText(o, "new")}>
             <>
               {o.type === "system_message" && (
                 <>
@@ -430,9 +491,9 @@ const updateOrder = async (id, action) => {
       {/* 🟠 ĐÃ XONG */}
       <div style={S.section}>Đã xong</div>
       {sorted
-        .filter((o) => o.status === "done")
-        .map((o) => (
-          <Card key={o.id} o={o}>
+  .filter((o) => showInDone(o))
+  .map((o) => (
+    <Card key={o.id} o={o} metaText={getMetaText(o, "done")}>
             <>
               {isNormal(o) && (
                 <>
@@ -440,9 +501,9 @@ const updateOrder = async (id, action) => {
                     <Btn onClick={() => updateOrder(o.id, "shipped")}>🚚 Giao</Btn>
                   )}
 
-                  {hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
-                    <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
-                  )}
+                  {hasPermission(PERMISSIONS.COMPLETE_ORDER) && o.status !== "completed" && (
+  <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
+)}
                 </>
               )}
 
@@ -460,9 +521,9 @@ const updateOrder = async (id, action) => {
       {/* 🟢 ĐÃ GIAO */}
       <div style={S.section}>Đã giao</div>
       {sorted
-        .filter((o) => isNormal(o) && o.status === "delivered")
-        .map((o) => (
-          <Card key={o.id} o={o}>
+  .filter((o) => showInDelivered(o))
+  .map((o) => (
+    <Card key={o.id} o={o} metaText={getMetaText(o, "delivered")}>
             <>
               {hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
                 <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
@@ -476,8 +537,8 @@ const updateOrder = async (id, action) => {
 
       {/* ⚫ HOÀN THÀNH */}
       <div style={S.section}>Hoàn thành</div>
-      {sorted.filter((o) => o.status === "completed").map((o) => (
-        <Card key={o.id} o={o}>
+      {sorted.filter((o) => showInCompleted(o)).map((o) => (
+  <Card key={o.id} o={o} metaText={getMetaText(o, "completed")}>
           {hasPermission(PERMISSIONS.EDIT_ORDER) && (
             <Btn onClick={() => updateOrder(o.id, "reset")}>↩ Đưa lên</Btn>
           )}
