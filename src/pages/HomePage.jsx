@@ -84,6 +84,7 @@ const S = {
 };
 
 export default function Home() {
+console.log("HOME REALTIME VERSION 1");
   const [orders, setOrders] = useState([]);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("today");
