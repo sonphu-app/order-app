@@ -88,6 +88,7 @@ console.log("HOME REALTIME VERSION 1");
   const [orders, setOrders] = useState([]);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("today");
+const [users, setUsers] = useState([]);
 
   // map snake_case -> camelCase cho UI
   const normalizeOrder = (row) => ({
@@ -101,6 +102,18 @@ console.log("HOME REALTIME VERSION 1");
   completedByName: row.completed_by_name || "",
   createdByName: row.created_by_name || "",
 });
+const loadUsersSupabase = async () => {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, name, username");
+
+  if (error) {
+    console.log("LOAD USERS ERROR:", error);
+    return;
+  }
+
+  setUsers(data || []);
+};
 
   // ✅ LOAD từ Supabase (CHỈ SELECT, KHÔNG UPDATE Ở ĐÂY)
   const loadOrdersSupabase = async () => {
@@ -138,8 +151,9 @@ setOrders(rows);
   };
 
   useEffect(() => {
-    loadOrdersSupabase();
-  }, []);
+  loadOrdersSupabase();
+  loadUsersSupabase();
+}, []);
 useEffect(() => {
   const channel = supabase
     .channel("orders-realtime")
@@ -175,8 +189,11 @@ useEffect(() => {
   const safeCreated = (o) => new Date(o.createdAt || o.created_at || 0);
 
   if (filter === "today") {
-    timeFiltered = orders.filter((o) => safeCreated(o) >= today);
-  }
+  timeFiltered = orders.filter((o) => {
+    if (o.status !== "completed") return true; // chưa hoàn thành thì luôn hiện
+    return safeCreated(o) >= today;            // đã hoàn thành thì mới lọc theo hôm nay
+  });
+}
 
   if (filter === "yesterday") {
     timeFiltered = orders.filter((o) => {
@@ -267,19 +284,32 @@ const updateOrder = async (id, action) => {
   }
 
   if (action === "ack" && current.type === "system_message") {
-    const old = Array.isArray(current.understoodBy)
-      ? current.understoodBy
-      : Array.isArray(current.understood_by)
-      ? current.understood_by
-      : [];
+  const old = Array.isArray(current.understoodBy)
+    ? current.understoodBy
+    : Array.isArray(current.understood_by)
+    ? current.understood_by
+    : [];
 
-    if (me?.id && !old.includes(me.id)) {
-      updateData.understood_by = [...old, me.id];
-    }
+  const nextUnderstood =
+    me?.id && !old.includes(me.id) ? [...old, me.id] : old;
 
+  updateData.understood_by = nextUnderstood;
+
+  const required = Array.isArray(current.requiredUsers)
+    ? current.requiredUsers
+    : Array.isArray(current.required_users)
+    ? current.required_users
+    : [];
+
+  const allUnderstood =
+    required.length > 0 &&
+    required.every((userId) => nextUnderstood.includes(userId));
+
+  if (allUnderstood) {
     updateData.status = "done";
     updateData.done_by_name = actorName;
   }
+}
 
   const { error } = await supabase
     .from("orders")
@@ -460,8 +490,9 @@ const getMetaText = (o, section) => {
   <div style={{ fontSize: 12, opacity: 0.8 }}>
     Chưa hiểu:{" "}
     {o.requiredUsers
-      .filter((u) => !(o.understoodBy || []).includes(u))
-      .join(", ")}
+  .filter((u) => !(o.understoodBy || []).includes(u))
+  .map(getUserName)
+  .join(", ")}
   </div>
 )}
                 </>

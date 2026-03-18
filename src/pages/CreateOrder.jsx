@@ -6,9 +6,6 @@ import { getCurrentUser } from "../utils/auth";
 import { useLocation } from "react-router-dom";
 
 // tạo id đơn giản
-function uid(prefix) {
-  return prefix + "_" + Date.now();
-}
 
 export default function CreateOrder() {
   const navigate = useNavigate();
@@ -17,10 +14,11 @@ const editingOrder = location.state?.editing || null;
   const me = getCurrentUser();
 
   // quyền (tạm cho admin dùng hết)
-  const canSystemTask = !me?.roles || me.roles?.includes("admin");
-  const canSystemMessage = !me?.roles || me.roles?.includes("admin");
+  const canSystemTask = me?.role === "admin";
+const canSystemMessage = me?.role === "admin";
 
-  const [text, setText] = useState("");
+const [submitting, setSubmitting] = useState(false); 
+ const [text, setText] = useState("");
 const [images, setImages] = useState([]);
 const [editingIndex, setEditingIndex] = useState(null);
   const [mode, setMode] = useState("normal");
@@ -28,14 +26,14 @@ useEffect(() => {
   if (editingOrder) {
     setText(
       editingOrder.title
-        ? editingOrder.title + "\n" + (editingOrder.text || "")
-        : editingOrder.text || ""
+  ? editingOrder.title + "\n" + (editingOrder.content || editingOrder.text || "")
+  : editingOrder.content || editingOrder.text || ""
     );
 
     setImages(editingOrder.images || []);
   }
 }, [editingOrder]);
- // normal | system-task | system-message
+ // normal | system_task | system_message
 const handleFiles = (e) => {
   const files = Array.from(e.target.files);
 
@@ -49,16 +47,14 @@ const handleFiles = (e) => {
 };
 
   // tách title / body từ text
-  const parsed = useMemo(() => {
-    const lines = (text || "").split("\n");
-    const title = (lines[0] || "").trim();
-    const body = lines.slice(1).join("\n").trim();
-    return { title, body };
-  }, [text]);
-
+  
   async function submit() {
   console.log("TEXT:", text);
   console.log("IMAGES:", images);
+
+  if (submitting) return;   // ✅ chống bấm nhiều
+  setSubmitting(true);      // ✅ bắt đầu xử lý
+try {
 
   if (!text.trim()) {
     alert("Bạn chưa nhập nội dung");
@@ -101,69 +97,64 @@ if (editingOrder) {
     .from("order_messages")
     .delete()
     .eq("order_id", editingOrder.id);
+let msgData = null;
 
-  // 3️⃣ Upload ảnh mới (nếu có)
-  for (let i = 0; i < images.length; i++) {
-    const base64 = images[i];
-    const blob = await (await fetch(base64)).blob();
-    const fileName = `${editingOrder.id}_${Date.now()}_${i}.png`;
+if (images.length > 0) {
+  const { data } = await supabase
+    .from("order_messages")
+    .insert({
+      order_id: editingOrder.id,
+      sender_id: me.id,
+      sender_name: me.name,
+      text: "",
+      seen_by: [me.id],
+      is_system: false,
+    })
+    .select()
+    .single();
 
-    const { error: uploadError } = await supabase.storage
-      .from("order-images")
-      .upload(fileName, blob);
+  msgData = data;
+}
 
-    if (uploadError) {
-      console.log(uploadError);
-      continue;
-    }
+// 3️⃣ Upload ảnh mới (nếu có)
+for (let i = 0; i < images.length; i++) {
+  const base64 = images[i];
+  const blob = await (await fetch(base64)).blob();
+  const fileName = `${editingOrder.id}_${Date.now()}_${i}.png`;
 
-    const { data: publicUrlData } = supabase.storage
-      .from("order-images")
-      .getPublicUrl(fileName);
+  const { error: uploadError } = await supabase.storage
+    .from("order-images")
+    .upload(fileName, blob);
 
-    const publicUrl = publicUrlData.publicUrl;
-
-    const { data: msgData } = await supabase
-      .from("order_messages")
-      .insert({
-        order_id: editingOrder.id,
-        sender_id: me.id,
-        sender_name: me.name,
-        text: "",
-        seen_by: [me.id],
-        is_system: false,
-      })
-      .select()
-      .single();
-
-    if (msgData) {
-      await supabase.from("order_message_images").insert({
-        message_id: msgData.id,
-        image_url: publicUrl,
-      });
-    }
+  if (uploadError) {
+    console.log(uploadError);
+    continue;
   }
+
+  const { data: publicUrlData } = supabase.storage
+    .from("order-images")
+    .getPublicUrl(fileName);
+
+  const publicUrl = publicUrlData.publicUrl;
+
+  if (msgData) {
+  await supabase.from("order_message_images").insert({
+    message_id: msgData.id,
+    image_url: publicUrl,
+  });
+}
+}
 
   navigate(`/order/${editingOrder.id}`);
   return;
 }
 
   // dữ liệu từ ô nhập
-  const baseData = {
-    title: parsed.title,
-    text: parsed.body,
-    images: images,
-  };
 const lines = text.split("\n");
 const title = lines[0] || "";
 const content = lines.slice(1).join("\n");
 
-const type =
-  mode === "normal"
-    ? "normal"
-    : mode === "system-task"
-    ? "system_task"
-    : "system_message";
+const type = mode;
 
 // 1) tạo order
 const { data: orderData, error: orderError } = await supabase
@@ -193,6 +184,24 @@ if (orderError) {
 }
 
 const orderId = orderData.id;
+let msgData = null;
+
+if (images.length > 0) {
+  const { data } = await supabase
+    .from("order_messages")
+    .insert({
+      order_id: orderId,
+      sender_id: me.id,
+      sender_name: me.name,
+      text: "",
+      seen_by: [me.id],
+      is_system: false,
+    })
+    .select()
+    .single();
+
+  msgData = data;
+}
 
 // 2) upload ảnh (nếu có)
 for (let i = 0; i < images.length; i++) {
@@ -216,20 +225,8 @@ for (let i = 0; i < images.length; i++) {
   const publicUrl = publicUrlData.publicUrl;
 
   // tạo 1 message để gắn ảnh
-  const { data: msgData, error: msgErr } = await supabase
-    .from("order_messages")
-    .insert({
-      order_id: orderId,
-      sender_id: me.id,
-      sender_name: me.name,
-      text: "",
-      seen_by: [me.id],
-      is_system: false,
-    })
-    .select()
-    .single();
 
-  if (!msgErr && msgData) {
+  if (msgData) {
     await supabase.from("order_message_images").insert({
       message_id: msgData.id,
       image_url: publicUrl,
@@ -238,6 +235,9 @@ for (let i = 0; i < images.length; i++) {
 }
 
 navigate("/");
+} finally {
+  setSubmitting(false);
+}
 
   // =========================
   // ✅ TRƯỜNG HỢP: ĐANG SỬA ĐƠN
@@ -263,8 +263,8 @@ navigate("/");
 
         {canSystemTask && (
           <button
-            style={{ ...S.modeBtn, ...(mode === "system-task" ? S.modeActive : {}) }}
-            onClick={() => setMode("system-task")}
+            style={{ ...S.modeBtn, ...(mode === "system_task" ? S.modeActive : {}) }}
+            onClick={() => setMode("system_task")}
           >
             ⭐ Nhiệm vụ hệ thống
           </button>
@@ -357,12 +357,16 @@ navigate("/");
 )}
 
 <div style={S.actions}>
-        <button style={S.btnCancel} onClick={() => navigate("/")}>
-          Huỷ
-        </button>
-        <button style={S.btnOk} onClick={submit}>
-          Tạo đơn
-        </button>
+        <button
+  style={S.btnCancel}
+  onClick={() => !submitting && navigate("/")}
+  disabled={submitting}
+>
+  Huỷ
+</button>
+        <button style={S.btnOk} onClick={submit} disabled={submitting}>
+  {submitting ? "Đang tạo..." : (editingOrder ? "Lưu sửa" : "Tạo đơn")}
+</button>
       </div>
     </div>
   );

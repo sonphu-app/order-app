@@ -1,6 +1,6 @@
+import { supabase } from "../supabaseClient";
 import { useParams, useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
-import { loadOrders, updateOrderById } from "../utils/ordersAdapter";
 import { getCurrentUser } from "../utils/auth";
 import OrderActions from "../components/OrderActions";
 import ImageEditor from "../components/ImageEditor";
@@ -40,20 +40,66 @@ const [chatViewer, setChatViewer] = useState(null);
 // null | { imgs: string[], i: number }
 
   /* ================= LOAD ORDER ================= */
-  useEffect(() => {
-    const found = loadOrders().find(o => o.id === id);
-    setOrder(found || null);
-  }, [id]);
+useEffect(() => {
+  const loadOrder = async () => {
+    const { data, error } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (error) {
+      console.log("LOAD ORDER ERROR:", error);
+      return;
+    }
+
+    setOrder(data);
+  };
+
+  loadOrder();
+}, [id]);
 
   /* ================= LOAD CHAT ================= */
-  useEffect(() => {
-    const stored = JSON.parse(localStorage.getItem("chat_" + id) || "[]");
-    setMessages(stored);
-  }, [id]);
+useEffect(() => {
+  const loadChat = async () => {
+    // 1. lấy message
+    const { data: msgs, error: msgErr } = await supabase
+      .from("order_messages")
+      .select("*")
+      .eq("order_id", id)
+      .order("created_at", { ascending: true });
+
+    if (msgErr) {
+      console.log("LOAD MSG ERROR:", msgErr);
+      return;
+    }
+
+    // 2. lấy ảnh
+    const { data: imgs, error: imgErr } = await supabase
+      .from("order_message_images")
+      .select("*");
+
+    if (imgErr) {
+      console.log("LOAD IMG ERROR:", imgErr);
+      return;
+    }
+
+    // 3. gộp ảnh vào message
+    const merged = (msgs || []).map(m => ({
+      ...m,
+      images: (imgs || [])
+        .filter(img => img.message_id === m.id)
+        .map(img => img.image_url),
+    }));
+
+    setMessages(merged);
+  };
+
+  loadChat();
+}, [id]);
 
   /* ================= SAVE CHAT + AUTO SCROLL ================= */
   useEffect(() => {
-    localStorage.setItem("chat_" + id, JSON.stringify(messages));
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, id]);
 
@@ -77,22 +123,78 @@ const [chatViewer, setChatViewer] = useState(null);
   if (!order) return null;
 
   /* ================= CHAT ================= */
-  function sendMessage() {
+  async function sendMessage() {
   if (!text.trim() && images.length === 0) return;
 
-  const msg = {
-  id: Date.now(),
-  userId: me.id,          // ⭐ thêm
-  name: me.name,          // ⭐ thêm
-  time: Date.now(),
-  text,
-  images,
-  seenBy: []
-};
+  // 1️⃣ tạo message trước
+  const { data: msgData, error: msgErr } = await supabase
+    .from("order_messages")
+    .insert({
+      order_id: id,
+      sender_id: me.id,
+      sender_name: me.name,
+      text: text || "",
+      seen_by: [me.id],
+      is_system: false,
+    })
+    .select()
+    .single();
 
-  setMessages(prev => [...prev, msg]);
+  if (msgErr || !msgData) {
+    console.log("SEND MSG ERROR:", msgErr);
+    return;
+  }
+
+  // 2️⃣ nếu có ảnh → upload + insert ảnh
+  for (let i = 0; i < images.length; i++) {
+    const base64 = images[i];
+    const blob = await (await fetch(base64)).blob();
+    const fileName = `${msgData.id}_${Date.now()}_${i}.png`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("order-images")
+      .upload(fileName, blob);
+
+    if (uploadError) {
+      console.log(uploadError);
+      continue;
+    }
+
+    const { data: publicUrlData } = supabase.storage
+      .from("order-images")
+      .getPublicUrl(fileName);
+
+    const publicUrl = publicUrlData.publicUrl;
+
+    await supabase.from("order_message_images").insert({
+      message_id: msgData.id,
+      image_url: publicUrl,
+    });
+  }
+
+  // 3️⃣ reset input
   setText("");
-  setImages([]);   // 🔥 reset preview sau khi gửi
+  setImages([]);
+
+  // 4️⃣ reload lại chat (để hiện ngay)
+  const { data: msgs } = await supabase
+    .from("order_messages")
+    .select("*")
+    .eq("order_id", id)
+    .order("created_at", { ascending: true });
+
+  const { data: imgs } = await supabase
+    .from("order_message_images")
+    .select("*");
+
+  const merged = (msgs || []).map(m => ({
+    ...m,
+    images: (imgs || [])
+      .filter(img => img.message_id === m.id)
+      .map(img => img.image_url),
+  }));
+
+  setMessages(merged);
 }
 
   function handleKey(e) {
@@ -112,7 +214,7 @@ const [chatViewer, setChatViewer] = useState(null);
 
   /* ================= DELETE ================= */
   function handleDelete() {
-    const isAdmin = me?.roles?.includes("admin");
+    const isAdmin = me?.role === "admin";
     if (!window.confirm("Xác nhận xoá đơn?")) return;
 
     if (isAdmin) {
@@ -134,17 +236,14 @@ const [chatViewer, setChatViewer] = useState(null);
       {/* ===== HEADER ===== */}
       <div style={S.header}>
         <div style={S.title}>
-  {order.type === "system-task" && "🚨 NHIỆM VỤ HỆ THỐNG"}
-  {order.type === "system-message" && "📢 TIN NHẮN HỆ THỐNG"}
+  {order.type === "system_task" && "🚨 NHIỆM VỤ HỆ THỐNG"}
+{order.type === "system_message" && "📢 TIN NHẮN HỆ THỐNG"}
   {(!order.type || order.type === "normal") && order.title}
 </div>
 
-        <div style={S.sub}>
-          Tạo: {order.createdBy || "-"} |
-          Đã xong: {order.done ? "✓" : "-"} |
-          Giao: {order.shipped ? "✓" : "-"} |
-          Hoàn thành: {order.completed ? "✓" : "-"}
-        </div>
+        Đã xong: {["done", "delivered", "completed"].includes(order.status) ? "✓" : "-"} |
+Giao: {["delivered", "completed"].includes(order.status) ? "✓" : "-"} |
+Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 <OrderActions
   order={order}
   onUpdated={(updated) => setOrder(updated)}
@@ -390,7 +489,7 @@ const [chatViewer, setChatViewer] = useState(null);
 )}
 
 {/* ===== EDITOR (SỬA ẢNH PREVIEW) ===== */}
-{editIndex >= 0 && order.images?.[editIndex] && (
+{editIndex >= 0 && images?.[editIndex] && (
   <div style={S.viewerOverlay}>
     <div
       style={S.viewerBackdrop}
@@ -406,18 +505,16 @@ const [chatViewer, setChatViewer] = useState(null);
       </button>
 
      <ImageEditor
-  src={order.images[editIndex]}
+  src={images[editIndex]}
   onClose={() => setEditIndex(-1)}
   onSave={(newDataUrl) => {
-    const next = [...order.images];
-    next[editIndex] = newDataUrl;
-
-    const updated = { ...order, images: next };
-    updateOrderById(order.id, updated);
-    setOrder(updated);
-
-    setEditIndex(-1);
-  }}
+  setImages(prev =>
+    prev.map((img, idx) =>
+      idx === editIndex ? newDataUrl : img
+    )
+  );
+  setEditIndex(-1);
+}}
 />
     </div>
   </div>
