@@ -164,7 +164,7 @@ await supabase.from("order_edit_history").insert({
 
  await replaceOrderImages(editingOrder.id, images);
 
-  navigate(`/order/${editingOrder.id}`);
+  navigate(`/order/${editingOrder.id}`, { replace: true });
   return;
 }
 
