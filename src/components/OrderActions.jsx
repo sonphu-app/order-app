@@ -1,188 +1,303 @@
-import { updateOrderById } from "../utils/ordersAdapter";
+import { supabase } from "../supabaseClient";
 import { useNavigate } from "react-router-dom";
 import { hasPermission, PERMISSIONS } from "../utils/permissions";
 import { getCurrentUser } from "../utils/auth";
+
 export default function OrderActions({ order, onUpdated }) {
-const navigate = useNavigate();
-const me = getCurrentUser();
-  function updateStatus(patch) {
-  const updated = {
-    ...order,
-    ...patch,
-    lastActionAt: new Date().toISOString() // 👈 thêm thời gian thực
-  };
+  const navigate = useNavigate();
+  const me = getCurrentUser();
 
-  updateOrderById(order.id, updated);
-  onUpdated(updated);
+  const actorId = me?.id;
+  const actorName = me?.name || me?.username || "Không rõ";
 
-  navigate("/");   // 👈 về home ngay
-}
-function handleEdit() {
-  const ok = window.confirm("Bạn muốn sửa đơn này?");
-  if (!ok) return;
+  async function updateStatus(updateData, goHome = true) {
+    const { data, error } = await supabase
+      .from("orders")
+      .update(updateData)
+      .eq("id", order.id)
+      .select()
+      .single();
 
-  navigate("/create", { state: { editing: order } });
-}
-function handleDelete() {
-  if (!window.confirm("Bạn muốn xóa đơn này?")) return;
+    if (error) {
+      console.log("UPDATE ORDER ERROR:", error);
+      return;
+    }
 
-  const orders = JSON.parse(localStorage.getItem("orders") || "[]")
-    .filter(o => o.id !== order.id);
+    onUpdated?.(data);
 
-  localStorage.setItem("orders", JSON.stringify(orders));
+    if (goHome) {
+      navigate("/", { replace: true });
+    }
+  }
 
-  window.location.href = "/";
-}
+  function handleEdit() {
+    const ok = window.confirm("Bạn muốn sửa đơn này?");
+    if (!ok) return;
+    navigate("/create", { state: { editing: order } });
+  }
+
+  async function handleDelete() {
+    if (!window.confirm("Bạn muốn xóa đơn này?")) return;
+
+    const { error } = await supabase
+      .from("orders")
+      .delete()
+      .eq("id", order.id);
+
+    if (error) {
+      console.log("DELETE ORDER ERROR:", error);
+      return;
+    }
+
+    navigate("/", { replace: true });
+  }
+
+  async function handleReset() {
+    await updateStatus(
+      {
+        status: "new",
+        done_by_name: "",
+        delivered_by_name: "",
+        completed_by_name: "",
+        understood_by: [],
+      },
+      true
+    );
+  }
+
+  async function handleSystemMessageAck() {
+    const oldUnderstood = Array.isArray(order.understood_by)
+      ? order.understood_by
+      : Array.isArray(order.understoodBy)
+      ? order.understoodBy
+      : [];
+
+    const requiredUsers = Array.isArray(order.required_users)
+      ? order.required_users
+      : Array.isArray(order.requiredUsers)
+      ? order.requiredUsers
+      : [];
+
+    const nextUnderstood =
+      actorId && !oldUnderstood.includes(actorId)
+        ? [...oldUnderstood, actorId]
+        : oldUnderstood;
+
+    const updateData = {
+      understood_by: nextUnderstood,
+    };
+
+    const allUnderstood =
+      requiredUsers.length > 0 &&
+      requiredUsers.every((userId) => nextUnderstood.includes(userId));
+
+    if (allUnderstood) {
+      updateData.status = "done";
+      updateData.done_by_name = actorName;
+    }
+
+    await updateStatus(updateData, true);
+  }
+
+  const isNormal = !order.type || order.type === "normal";
+  const isSystemTask = order.type === "system_task";
+  const isSystemMessage = order.type === "system_message";
+
   return (
-  <div style={S.actionRow}>
+    <div style={S.actionRow}>
+      {/* ===== BÊN TRÁI: TRẠNG THÁI ===== */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {/* ========== SYSTEM TASK ========== */}
+        {isSystemTask && (
+          <>
+            {order.status === "new" &&
+              hasPermission(PERMISSIONS.MARK_DONE) && (
+                <button
+                  style={S.btn}
+                  onClick={() =>
+                    updateStatus({
+                      status: "done",
+                      done_by_name: actorName,
+                    })
+                  }
+                >
+                  ✔ Đã xong
+                </button>
+              )}
 
-    {/* ===== BÊN TRÁI: TRẠNG THÁI ===== */}
-<div style={{ display: "flex", gap: 6 }}>
+            {order.status === "done" &&
+              hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+                <button
+                  style={S.btn}
+                  onClick={() =>
+                    updateStatus({
+                      status: "completed",
+                      completed_by_name: actorName,
+                    })
+                  }
+                >
+                  🏁 Hoàn thành
+                </button>
+              )}
 
-  {/* ========== SYSTEM TASK ========== */}
-  {order.type === "system-task" && (
-    <>
-      {/* Bước 1: Đã xong */}
-      {!order.done && (
-        <button style={S.btn} onClick={() => updateStatus({ done: true })}>
-          ✓ Đã xong
-        </button>
-      )}
+            {order.status === "completed" && (
+              <div style={{ fontWeight: 700 }}>✅ Đã hoàn thành</div>
+            )}
+          </>
+        )}
 
-      {/* Bước 2: Hoàn thành */}
-      {order.done && !order.completed && (
-        <button style={S.btn} onClick={() => updateStatus({ completed: true })}>
-          🏁 Hoàn thành
-        </button>
-      )}
+        {/* ========== SYSTEM MESSAGE ========== */}
+        {isSystemMessage && (
+          <>
+            {order.status === "new" &&
+              hasPermission(PERMISSIONS.MARK_DONE) && (
+                <button style={S.btn} onClick={handleSystemMessageAck}>
+                  👁 Đã hiểu
+                </button>
+              )}
 
-      {/* Xong hẳn */}
-      {order.done && order.completed && (
-        <div style={{ fontWeight: 700 }}>✅ Đã hoàn thành</div>
-      )}
-    </>
-  )}
+            {order.status === "done" &&
+              hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+                <button
+                  style={S.btn}
+                  onClick={() =>
+                    updateStatus({
+                      status: "completed",
+                      completed_by_name: actorName,
+                    })
+                  }
+                >
+                  🏁 Hoàn thành
+                </button>
+              )}
 
-  {/* ========== SYSTEM MESSAGE ========== */}
-  {order.type === "system-message" && (
-    <>
-      {/* Bước 1: Đã hiểu */}
-      {!order.done && (
-        <button style={S.btn} onClick={() => updateStatus({ done: true })}>
-          👁 Đã hiểu
-        </button>
-      )}
+            {order.status === "completed" && (
+              <div style={{ fontWeight: 700 }}>✅ Đã hoàn thành</div>
+            )}
+          </>
+        )}
 
-      {/* Bước 2: Hoàn thành */}
-      {order.done && !order.completed && (
-        <button style={S.btn} onClick={() => updateStatus({ completed: true })}>
-          🏁 Hoàn thành
-        </button>
-      )}
+        {/* ========== ĐƠN THƯỜNG ========== */}
+        {isNormal && (
+          <>
+            {order.status === "completed" && order.delivered_by_name && (
+              <div style={{ fontWeight: 700 }}>✅ Đã hoàn thành</div>
+            )}
 
-      {/* Xong hẳn */}
-      {order.done && order.completed && (
-        <div style={{ fontWeight: 700 }}>✅ Đã hoàn thành</div>
-      )}
-    </>
-  )}
+            {order.status === "new" &&
+              hasPermission(PERMISSIONS.MARK_DONE) && (
+                <button
+                  style={S.btn}
+                  onClick={() =>
+                    updateStatus({
+                      status: "done",
+                      done_by_name: actorName,
+                    })
+                  }
+                >
+                  ✔ Đã xong
+                </button>
+              )}
 
-  {/* ========== ĐƠN THƯỜNG (normal) ========== */}
-  {(!order.type || order.type === "normal") && (
-    <>
-      {/* Đã hoàn thành (xong hết) */}
-      {order.done && order.shipped && order.completed && (
-        <div style={{ fontWeight: 700 }}>✅ Đã hoàn thành</div>
-      )}
+            {order.status === "done" && (
+              <>
+                {hasPermission(PERMISSIONS.MARK_DELIVERED) && (
+                  <button
+                    style={S.btn}
+                    onClick={() =>
+                      updateStatus({
+                        status: "delivered",
+                        delivered_by_name: actorName,
+                      })
+                    }
+                  >
+                    🚚 Giao
+                  </button>
+                )}
 
-      {/* Chưa làm gì -> Đã xong */}
-      {!order.done && !order.shipped && !order.completed &&
-        hasPermission(PERMISSIONS.MARK_DONE) && (
-          <button style={S.btn} onClick={() => updateStatus({ done: true })}>
-            Đã xong
+                {hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+                  <button
+                    style={S.btn}
+                    onClick={() =>
+                      updateStatus({
+                        status: "completed",
+                        completed_by_name: actorName,
+                      })
+                    }
+                  >
+                    🏁 Hoàn thành
+                  </button>
+                )}
+              </>
+            )}
+
+            {order.status === "delivered" &&
+              hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+                <button
+                  style={S.btn}
+                  onClick={() =>
+                    updateStatus({
+                      status: "completed",
+                      completed_by_name: actorName,
+                    })
+                  }
+                >
+                  🏁 Hoàn thành
+                </button>
+              )}
+
+            {order.status === "completed" &&
+              !order.delivered_by_name &&
+              hasPermission(PERMISSIONS.MARK_DELIVERED) && (
+                <button
+                  style={S.btn}
+                  onClick={() =>
+                    updateStatus({
+                      status: "completed",
+                      delivered_by_name: actorName,
+                    })
+                  }
+                >
+                  🚚 Giao
+                </button>
+              )}
+          </>
+        )}
+      </div>
+
+      {/* ===== BÊN PHẢI: HÀNH ĐỘNG ===== */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {hasPermission(PERMISSIONS.EDIT_ORDER) && (
+          <button style={S.btn} onClick={handleReset}>
+            Làm lại
           </button>
-      )}
+        )}
 
-      {/* Đã xong -> Giao / Hoàn thành */}
-      {order.done && !order.shipped && !order.completed && (
-        <>
-          {hasPermission(PERMISSIONS.MARK_DELIVERED) && (
-            <button style={S.btn} onClick={() => updateStatus({ shipped: true })}>
-              🚚 Giao
-            </button>
-          )}
-
-          {hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
-            <button style={S.btn} onClick={() => updateStatus({ completed: true })}>
-              🏁 Hoàn thành
-            </button>
-          )}
-        </>
-      )}
-
-      {/* Đã giao -> Hoàn thành */}
-      {order.shipped && !order.completed &&
-        hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
-          <button style={S.btn} onClick={() => updateStatus({ completed: true })}>
-            🏁 Hoàn thành
+        {hasPermission(PERMISSIONS.EDIT_ORDER) && (
+          <button style={S.btn} onClick={handleEdit}>
+            Sửa đơn
           </button>
-      )}
+        )}
 
-      {/* Đã hoàn thành nhưng chưa giao -> Giao */}
-      {order.completed && !order.shipped &&
-        hasPermission(PERMISSIONS.MARK_DELIVERED) && (
-<button style={S.btn} onClick={() => updateStatus({ shipped: true })}>
-            🚚 Giao
+        {hasPermission(PERMISSIONS.DELETE_ORDER) && (
+          <button style={S.btnDanger} onClick={handleDelete}>
+            Xoá
           </button>
-      )}
-    </>
-  )}
-
-</div>
-    {/* ===== BÊN PHẢI: HÀNH ĐỘNG ===== */}
-    <div style={{ display: "flex", gap: 6 }}>
-
-      {/* LÀM LẠI */}
-      {hasPermission(PERMISSIONS.EDIT_ORDER) && (
-  <button
-    style={S.btn}
-    onClick={() => {
-      updateStatus({
-        done: false,
-        shipped: false,
-        completed: false
-      });
-      navigate("/");
-    }}
-  >
-    Làm lại
-  </button>
-)}
-
-      {hasPermission(PERMISSIONS.EDIT_ORDER) && (
-  <button style={S.btn} onClick={handleEdit}>
-    Sửa đơn
-  </button>
-)}
-
-      {hasPermission(PERMISSIONS.DELETE_ORDER) && (
-  <button style={S.btnDanger} onClick={handleDelete}>
-    Xoá
-  </button>
-)}
-
+        )}
+      </div>
     </div>
-
-  </div>
-);
+  );
 }
+
 const S = {
   actionRow: {
-  display: "flex",
-  justifyContent: "space-between",   // 👈 thêm dòng này
-  alignItems: "center",
-  marginTop: 6
-},
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 6,
+    gap: 8,
+    flexWrap: "wrap",
+  },
 
   btn: {
     background: "#2c2c2c",
@@ -196,7 +311,7 @@ const S = {
     alignItems: "center",
     justifyContent: "center",
     whiteSpace: "nowrap",
-    cursor: "pointer"
+    cursor: "pointer",
   },
 
   btnDanger: {
@@ -211,21 +326,6 @@ const S = {
     alignItems: "center",
     justifyContent: "center",
     whiteSpace: "nowrap",
-    cursor: "pointer"
+    cursor: "pointer",
   },
-
-  btnActive: {
-    background: "#166534",
-    color: "#fff",
-    border: "1px solid #166534",
-    borderRadius: 6,
-    padding: "4px 8px",
-    fontSize: 12,
-    height: 28,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    whiteSpace: "nowrap",
-    cursor: "pointer"
-  }
 };

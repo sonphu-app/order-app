@@ -89,7 +89,8 @@ export function logout() {
 // ===== CURRENT USER =====
 export function getCurrentUser() {
   try {
-    return JSON.parse(localStorage.getItem(CURRENT_USER_KEY));
+    const raw = localStorage.getItem(CURRENT_USER_KEY);
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
@@ -117,4 +118,29 @@ export async function deleteUserById(userId) {
   }
 
   return true;
+}
+export async function refreshCurrentUser() {
+  const current = getCurrentUser();
+  if (!current?.id) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("id", current.id)
+    .single();
+
+  if (error || !data) {
+    logout();
+    return null;
+  }
+
+  const freshUser = {
+    ...data,
+    permissions: Array.isArray(data.permissions)
+      ? data.permissions
+      : (data.permissions ? Object.values(data.permissions) : []),
+  };
+
+  localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(freshUser));
+  return freshUser;
 }

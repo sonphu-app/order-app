@@ -1,13 +1,12 @@
 import { supabase } from "../supabaseClient";
 import { useParams, useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
-import { getCurrentUser } from "../utils/auth";
+import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
 import OrderActions from "../components/OrderActions";
 import ImageEditor from "../components/ImageEditor";
-import { getUsers } from "../utils/auth";
 
 export default function OrderDetail() {
-const users = getUsers();
+const [users, setUsers] = useState([]);
 
 const getName = (id) => {
   const u = users.find(x => x.id === id);
@@ -26,6 +25,7 @@ const inputRef = useRef(null);
 const [images, setImages] = useState([]);
 
   // CHAT
+const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
 
@@ -38,163 +38,215 @@ const [editIndex, setEditIndex] = useState(-1);
 // VIEWER cho ảnh trong CHAT
 const [chatViewer, setChatViewer] = useState(null); 
 // null | { imgs: string[], i: number }
-
-  /* ================= LOAD ORDER ================= */
 useEffect(() => {
-  const loadOrder = async () => {
-    const { data, error } = await supabase
-      .from("orders")
-      .select("*")
-      .eq("id", id)
-      .single();
-
-    if (error) {
-      console.log("LOAD ORDER ERROR:", error);
-      return;
-    }
-
-    setOrder(data);
+  const run = async () => {
+    await refreshCurrentUser();
+    const list = await getUsers();
+    setUsers(list || []);
   };
 
+  run();
+}, []);
+
+  /* ================= LOAD ORDER ================= */
+const loadOrder = async () => {
+  // 1. lấy order
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (error) {
+    console.log("LOAD ORDER ERROR:", error);
+    return;
+  }
+
+  // 2. lấy ảnh của order
+  const { data: orderImgs, error: imgErr } = await supabase
+    .from("order_images")
+    .select("*")
+    .eq("order_id", id)
+    .order("created_at", { ascending: true });
+
+  if (imgErr) {
+    console.log("LOAD ORDER IMAGES ERROR:", imgErr);
+  }
+
+  // 3. gộp lại
+  setOrder({
+    ...data,
+    images: (orderImgs || []).map(x => x.image_url),
+  });
+};
+
+useEffect(() => {
   loadOrder();
+}, [id]);
+useEffect(() => {
+  const channel = supabase
+    .channel(`order-detail-${id}`)
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "orders", filter: `id=eq.${id}` },
+      () => loadOrder()
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "order_messages", filter: `order_id=eq.${id}` },
+      () => loadChat()
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "order_images", filter: `order_id=eq.${id}` },
+      () => loadOrder()
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "order_message_images" },
+      () => loadChat()
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
 }, [id]);
 
   /* ================= LOAD CHAT ================= */
-useEffect(() => {
-  const loadChat = async () => {
-    // 1. lấy message
-    const { data: msgs, error: msgErr } = await supabase
-      .from("order_messages")
-      .select("*")
-      .eq("order_id", id)
-      .order("created_at", { ascending: true });
+const loadChat = async () => {
+  const { data: msgs, error: msgErr } = await supabase
+    .from("order_messages")
+    .select("*")
+    .eq("order_id", id)
+    .order("created_at", { ascending: true });
 
-    if (msgErr) {
-      console.log("LOAD MSG ERROR:", msgErr);
-      return;
-    }
+  if (msgErr) {
+    console.log("LOAD MSG ERROR:", msgErr);
+    return;
+  }
 
-    // 2. lấy ảnh
-    const { data: imgs, error: imgErr } = await supabase
+  const msgIds = (msgs || []).map((m) => m.id);
+
+  let imgs = [];
+
+  if (msgIds.length > 0) {
+    const { data: imgRows, error: imgErr } = await supabase
       .from("order_message_images")
-      .select("*");
+      .select("*")
+      .in("message_id", msgIds);
 
     if (imgErr) {
       console.log("LOAD IMG ERROR:", imgErr);
       return;
     }
 
-    // 3. gộp ảnh vào message
-    const merged = (msgs || []).map(m => ({
-      ...m,
-      images: (imgs || [])
-        .filter(img => img.message_id === m.id)
-        .map(img => img.image_url),
-    }));
+    imgs = imgRows || [];
+  }
 
-    setMessages(merged);
-  };
+  const merged = (msgs || []).map((m) => ({
+    ...m,
+    images: imgs
+      .filter((img) => img.message_id === m.id)
+      .map((img) => img.image_url),
+  }));
 
+  setMessages(merged);
+};
+
+useEffect(() => {
   loadChat();
 }, [id]);
-
-  /* ================= SAVE CHAT + AUTO SCROLL ================= */
+  /* ================= SCROLL TO TOP WHEN OPEN ORDER ================= */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, id]);
+  orderTopRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
+}, [id]);
 
   /* ================= MARK AS SEEN ================= */
   useEffect(() => {
-    if (!me?.username) return;
+  if (!me?.id || messages.length === 0) return;
 
-    setMessages(prev =>
-      prev.map(m => {
-        if (m.userId !== me.id && !m.seenBy?.includes(me.id)) {
-  return {
-    ...m,
-    seenBy: [...(m.seenBy || []), me.id]
-  };
-}
-        return m;
-      })
+  const markSeen = async () => {
+    const needUpdate = messages.filter(
+      (m) =>
+        m.sender_id !== me.id &&
+        !(m.seen_by || []).includes(me.id)
     );
-  }, [me?.username]);
+
+    for (const m of needUpdate) {
+      await supabase
+        .from("order_messages")
+        .update({
+          seen_by: [...(m.seen_by || []), me.id],
+        })
+        .eq("id", m.id);
+    }
+  };
+
+  markSeen();
+}, [messages, me?.id]);
 
   if (!order) return null;
 
   /* ================= CHAT ================= */
   async function sendMessage() {
+  if (sending) return;
   if (!text.trim() && images.length === 0) return;
 
-  // 1️⃣ tạo message trước
-  const { data: msgData, error: msgErr } = await supabase
-    .from("order_messages")
-    .insert({
-      order_id: id,
-      sender_id: me.id,
-      sender_name: me.name,
-      text: text || "",
-      seen_by: [me.id],
-      is_system: false,
-    })
-    .select()
-    .single();
+  setSending(true);
 
-  if (msgErr || !msgData) {
-    console.log("SEND MSG ERROR:", msgErr);
-    return;
-  }
+  try {
+    const { data: msgData, error: msgErr } = await supabase
+      .from("order_messages")
+      .insert({
+        order_id: id,
+        sender_id: me.id,
+        sender_name: me.name || me.username || "Không rõ",
+        text: text.trim(),
+        seen_by: [me.id],
+        is_system: false,
+      })
+      .select()
+      .single();
 
-  // 2️⃣ nếu có ảnh → upload + insert ảnh
-  for (let i = 0; i < images.length; i++) {
-    const base64 = images[i];
-    const blob = await (await fetch(base64)).blob();
-    const fileName = `${msgData.id}_${Date.now()}_${i}.png`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("order-images")
-      .upload(fileName, blob);
-
-    if (uploadError) {
-      console.log(uploadError);
-      continue;
+    if (msgErr || !msgData) {
+      console.log("SEND MSG ERROR:", msgErr);
+      return;
     }
 
-    const { data: publicUrlData } = supabase.storage
-      .from("order-images")
-      .getPublicUrl(fileName);
+    for (let i = 0; i < images.length; i++) {
+      const base64 = images[i];
+      const blob = await (await fetch(base64)).blob();
+      const fileName = `${msgData.id}_${Date.now()}_${i}.png`;
 
-    const publicUrl = publicUrlData.publicUrl;
+      const { error: uploadError } = await supabase.storage
+        .from("order-images")
+        .upload(fileName, blob);
 
-    await supabase.from("order_message_images").insert({
-      message_id: msgData.id,
-      image_url: publicUrl,
-    });
+      if (uploadError) {
+        console.log("UPLOAD CHAT IMG ERROR:", uploadError);
+        continue;
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from("order-images")
+        .getPublicUrl(fileName);
+
+      await supabase.from("order_message_images").insert({
+        message_id: msgData.id,
+        image_url: publicUrlData.publicUrl,
+      });
+    }
+
+    setText("");
+    setImages([]);
+
+    setTimeout(() => {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 100);
+  } finally {
+    setSending(false);
   }
-
-  // 3️⃣ reset input
-  setText("");
-  setImages([]);
-
-  // 4️⃣ reload lại chat (để hiện ngay)
-  const { data: msgs } = await supabase
-    .from("order_messages")
-    .select("*")
-    .eq("order_id", id)
-    .order("created_at", { ascending: true });
-
-  const { data: imgs } = await supabase
-    .from("order_message_images")
-    .select("*");
-
-  const merged = (msgs || []).map(m => ({
-    ...m,
-    images: (imgs || [])
-      .filter(img => img.message_id === m.id)
-      .map(img => img.image_url),
-  }));
-
-  setMessages(merged);
 }
 
   function handleKey(e) {
@@ -213,21 +265,21 @@ useEffect(() => {
   }
 
   /* ================= DELETE ================= */
-  function handleDelete() {
-    const isAdmin = me?.role === "admin";
-    if (!window.confirm("Xác nhận xoá đơn?")) return;
+  async function handleDelete() {
+  if (!window.confirm("Xác nhận xoá đơn?")) return;
 
-    if (isAdmin) {
-      const orders = loadOrders().filter(o => o.id !== order.id);
-      localStorage.setItem("orders", JSON.stringify(orders));
-      navigate("/");
-    } else {
-      const updated = { ...order, cancelRequested: true };
-      updateOrderById(order.id, updated);
-      setOrder(updated);
-      navigate("/");
-    }
+  const { error } = await supabase
+    .from("orders")
+    .delete()
+    .eq("id", order.id);
+
+  if (error) {
+    console.log("DELETE ERROR:", error);
+    return;
   }
+
+  navigate("/");
+}
 
   /* ================= RENDER ================= */
   return (
@@ -252,11 +304,11 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         <div
   style={S.backBar}
   onClick={() =>
-    window.scrollTo({
-      top: 0,
-      behavior: "smooth"
-    })
-  }
+  orderTopRef.current?.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  })
+}
 >
   ↑ Quay lại đơn hàng
 </div>
@@ -273,8 +325,8 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
   </div>
 
   <div style={{ marginTop: 6 }}>
-    {order.text}
-  </div>
+  {order.content}
+</div>
 </div>
 
           {order.images?.length > 0 && (
@@ -295,7 +347,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         {/* ===== CHAT ===== */}
         <div>
           {messages.map(m => {
-            const isOwner = m.userId === me.id;
+            const isOwner = m.sender_id === me.id;
             return (
               <div
                 key={m.id}
@@ -308,13 +360,13 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
                 <div
                   style={{
                     ...S.bubble,
-                    background: isOwner ? "#1f6f8b" : "#2a2a2a",
+                    background: isOwner ? "#6fb7d6" : "#6b4f3a",
                     color: isOwner ? "#000" : "#fff"
                   }}
                 >
                   <div style={S.msgHeader}>
-                    <span>{m.name}</span>
-                    <span>{new Date(m.time).toLocaleString()}</span>
+                    <span>{m.sender_name}</span>
+                    <span>{new Date(m.created_at).toLocaleString()}</span>
                     {isOwner && (
                       <span style={S.recall} onClick={() => recall(m.id)}>
                         Thu hồi
@@ -347,8 +399,8 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 )}
 
                   <div style={S.seen}>
-                    {m.seenBy?.length
-  ? "Đã xem: " + m.seenBy.map(getName).join(", ")
+                    {m.seen_by?.length
+  ? "Đã xem: " + m.seen_by.map(getName).join(", ")
   : "Chưa ai xem"}
                   </div>
                 </div>
@@ -416,7 +468,9 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     />
 
     <div style={S.inputBtns}>
-      <button style={S.sendBtn} onClick={sendMessage}>➤</button>
+      <button style={S.sendBtn} onClick={sendMessage} disabled={sending}>
+  {sending ? "..." : "➤"}
+</button>
       <button
         style={S.nlBtn}
         onClick={() => {

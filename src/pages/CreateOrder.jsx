@@ -24,10 +24,12 @@ const [editingIndex, setEditingIndex] = useState(null);
   const [mode, setMode] = useState("normal");
 useEffect(() => {
   if (editingOrder) {
+    setMode(editingOrder.type || "normal");
+
     setText(
       editingOrder.title
-  ? editingOrder.title + "\n" + (editingOrder.content || editingOrder.text || "")
-  : editingOrder.content || editingOrder.text || ""
+        ? editingOrder.title + "\n" + (editingOrder.content || editingOrder.text || "")
+        : editingOrder.content || editingOrder.text || ""
     );
 
     setImages(editingOrder.images || []);
@@ -45,6 +47,52 @@ const handleFiles = (e) => {
     reader.readAsDataURL(file);
   });
 };
+async function uploadOneImage(fileBase64, fileName) {
+  const blob = await (await fetch(fileBase64)).blob();
+
+  const { error: uploadError } = await supabase.storage
+    .from("order-images")
+    .upload(fileName, blob);
+
+  if (uploadError) {
+    console.log("UPLOAD ORDER IMAGE ERROR:", uploadError);
+    return null;
+  }
+
+  const { data: publicUrlData } = supabase.storage
+    .from("order-images")
+    .getPublicUrl(fileName);
+
+  return publicUrlData.publicUrl;
+}
+
+async function replaceOrderImages(orderId, imageList) {
+  // xoá ảnh cũ trong bảng liên kết ảnh đơn
+  await supabase
+    .from("order_images")
+    .delete()
+    .eq("order_id", orderId);
+
+  const rows = [];
+
+  for (let i = 0; i < imageList.length; i++) {
+    const url = await uploadOneImage(
+      imageList[i],
+      `${orderId}_${Date.now()}_${i}.png`
+    );
+
+    if (url) {
+      rows.push({
+        order_id: orderId,
+        image_url: url,
+      });
+    }
+  }
+
+  if (rows.length > 0) {
+    await supabase.from("order_images").insert(rows);
+  }
+}
 
   // tách title / body từ text
   
@@ -91,6 +139,28 @@ if (editingOrder) {
     alert("Lỗi sửa đơn");
     return;
   }
+const beforeData = {
+  title: editingOrder.title || "",
+  content: editingOrder.content || editingOrder.text || "",
+  type: editingOrder.type || "normal",
+  status: editingOrder.status || "new",
+};
+
+const afterData = {
+  title: title.trim(),
+  content: content.trim(),
+  type: editingOrder.type || "normal",
+  status: "new",
+};
+
+await supabase.from("order_edit_history").insert({
+  order_id: editingOrder.id,
+  editor_id: me?.id || null,
+  sender_name: me?.name || me?.username || "Không rõ",
+  action: "edit",
+  before_data: beforeData,
+  after_data: afterData,
+});
 
   // 2️⃣ XÓA toàn bộ message + ảnh cũ
   await supabase

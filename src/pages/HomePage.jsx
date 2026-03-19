@@ -1,3 +1,5 @@
+import { refreshCurrentUser } from "../utils/auth";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "../supabaseClient";
 import { ensureWeeklySystemTask } from "../utils/systemTasks";
 import { useEffect, useMemo, useState, useRef } from "react";
@@ -84,6 +86,7 @@ const S = {
 };
 
 export default function Home() {
+const navigate = useNavigate();
 console.log("HOME REALTIME VERSION 1");
   const [orders, setOrders] = useState([]);
   const [q, setQ] = useState("");
@@ -114,7 +117,10 @@ const loadUsersSupabase = async () => {
 
   setUsers(data || []);
 };
-
+const getUserName = (id) => {
+  const u = users.find((x) => x.id === id);
+  return u?.name || u?.username || id;
+};
   // ✅ LOAD từ Supabase (CHỈ SELECT, KHÔNG UPDATE Ở ĐÂY)
   const loadOrdersSupabase = async () => {
     const { data, error } = await supabase
@@ -151,8 +157,12 @@ setOrders(rows);
   };
 
   useEffect(() => {
-  loadOrdersSupabase();
-  loadUsersSupabase();
+  const run = async () => {
+    await refreshCurrentUser();
+    loadOrdersSupabase();
+    loadUsersSupabase();
+  };
+  run();
 }, []);
 useEffect(() => {
   const channel = supabase
@@ -356,7 +366,7 @@ const updateOrder = async (id, action) => {
     return (
       <div
         style={{ ...S.card, background: getCardColor(o) }}
-        onClick={() => (window.location.href = `/order/${o.id}`)}
+        onClick={() => navigate(`/order/${o.id}`)}
       >
         <div style={S.cardContent}>
           {o.type === "system_message" && (
