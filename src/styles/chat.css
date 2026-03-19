@@ -476,6 +476,21 @@ body {
   .navBtn.right{
     right:8px;
   }
+/* ... toàn bộ code cũ ở trên ... */
+
+.viewerImg {
+  max-width: 95%;
+  max-height: 90%;
+  object-fit: contain;
+}
+
+/* THÊM XUỐNG CUỐI FILE */
+.composer textarea{
+  min-height: 44px;
+  max-height: 110px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
 }
 
 

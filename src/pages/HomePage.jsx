@@ -1,3 +1,4 @@
+import { enablePushNotifications, syncPushHeartbeat } from "../utils/push";
 import { refreshCurrentUser } from "../utils/auth";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../supabaseClient";
@@ -90,7 +91,7 @@ const navigate = useNavigate();
 console.log("HOME REALTIME VERSION 1");
   const [orders, setOrders] = useState([]);
   const [q, setQ] = useState("");
-  const [filter, setFilter] = useState("today");
+  const [filter, setFilter] = useState(null);
 const [users, setUsers] = useState([]);
 const [orderUnreadMap, setOrderUnreadMap] = useState({});
 const [groupUnreadCount, setGroupUnreadCount] = useState(0);
@@ -214,6 +215,7 @@ setOrders(rows);
     await loadUsersSupabase();
     await loadOrderUnreadCounts();
     await loadGroupUnreadCount();
+await syncPushHeartbeat();
   };
   run();
 }, []);
@@ -260,48 +262,95 @@ useEffect(() => {
   };
 }, []);
   // ===== LỌC THEO THỜI GIAN =====
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+const today = new Date();
+today.setHours(0, 0, 0, 0);
 
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
+const threeDaysAgo = new Date(today);
+threeDaysAgo.setDate(today.getDate() - 2);
 
-  const sevenDaysAgo = new Date(today);
-  sevenDaysAgo.setDate(today.getDate() - 7);
+const yesterday = new Date(today);
+yesterday.setDate(today.getDate() - 1);
 
-  let timeFiltered = orders;
+const sevenDaysAgo = new Date(today);
+sevenDaysAgo.setDate(today.getDate() - 7);
 
-  const safeCreated = (o) => new Date(o.createdAt || o.created_at || 0);
+let timeFiltered = orders;
 
-  if (filter === "today") {
+// thời gian để lọc: ưu tiên lần cập nhật cuối, fallback về ngày tạo
+const safeFilterTime = (o) =>
+  new Date(o.lastActionAt || o.updated_at || o.createdAt || o.created_at || 0);
+
+// MỞ APP: không nút nào sáng, nhưng hiện 3 ngày gần nhất
+if (filter === null) {
   timeFiltered = orders.filter((o) => {
-    if (o.status !== "completed") return true; // chưa hoàn thành thì luôn hiện
-    return safeCreated(o) >= today;            // đã hoàn thành thì mới lọc theo hôm nay
+    const isCompletedButNotDelivered =
+      o.status === "completed" && !o.deliveredByName;
+
+    const shouldAlwaysShow = (() => {
+  const isSystem = o.type === "system_task" || o.type === "system_message";
+
+  if (isSystem) {
+    return o.status !== "completed";
+  }
+
+  return o.status !== "completed" || !o.deliveredByName;
+})();
+
+    if (shouldAlwaysShow) return true;
+
+    const t = safeFilterTime(o);
+    return t >= threeDaysAgo;
   });
 }
 
-  if (filter === "yesterday") {
-    timeFiltered = orders.filter((o) => {
-      const created = safeCreated(o);
-      return created >= yesterday && created < today;
-    });
+// BẤM "HÔM NAY": chỉ đúng hôm nay
+if (filter === "today") {
+  timeFiltered = orders.filter((o) => {
+    const isCompletedButNotDelivered =
+      o.status === "completed" && !o.deliveredByName;
+
+    const shouldAlwaysShow = (() => {
+  const isSystem = o.type === "system_task" || o.type === "system_message";
+
+  if (isSystem) {
+    return o.status !== "completed";
   }
 
-  if (filter === "7days") {
-    timeFiltered = orders.filter((o) => safeCreated(o) >= sevenDaysAgo);
-  }
+  return o.status !== "completed" || !o.deliveredByName;
+})();
 
-  // ✅ custom date
-  if (typeof filter === "object" && filter.type === "custom") {
-    const fromDate = new Date(filter.from);
-    const toDate = new Date(filter.to);
-    toDate.setHours(23, 59, 59, 999);
+    if (shouldAlwaysShow) return true;
 
-    timeFiltered = orders.filter((o) => {
-      const created = safeCreated(o);
-      return created >= fromDate && created <= toDate;
-    });
-  }
+    const t = safeFilterTime(o);
+    return t >= today;
+  });
+}
+
+if (filter === "yesterday") {
+  timeFiltered = orders.filter((o) => {
+    const t = safeFilterTime(o);
+    return t >= yesterday && t < today;
+  });
+}
+
+if (filter === "7days") {
+  timeFiltered = orders.filter((o) => {
+    const t = safeFilterTime(o);
+    return t >= sevenDaysAgo;
+  });
+}
+
+// ✅ custom date
+if (filter && typeof filter === "object" && filter.type === "custom") {
+  const fromDate = new Date(filter.from);
+  const toDate = new Date(filter.to);
+  toDate.setHours(23, 59, 59, 999);
+
+  timeFiltered = orders.filter((o) => {
+    const t = safeFilterTime(o);
+    return t >= fromDate && t <= toDate;
+  });
+}
 
   // ===== LỌC THEO TÌM KIẾM =====
   const finalFiltered = timeFiltered.filter((o) => {
@@ -335,6 +384,7 @@ const updateOrder = async (id, action) => {
 
   const me = getCurrentUser() || {};
   const actorName = me?.name || me?.username || "Không rõ";
+  const now = new Date().toISOString();
 
   let updateData = {};
 
@@ -344,6 +394,7 @@ const updateOrder = async (id, action) => {
       done_by_name: "",
       delivered_by_name: "",
       completed_by_name: "",
+      updated_at: now,
     };
   }
 
@@ -351,50 +402,54 @@ const updateOrder = async (id, action) => {
     updateData = {
       status: "done",
       done_by_name: actorName,
+      updated_at: now,
     };
   }
 
   if (action === "shipped") {
-  updateData = {
-    status: current.status === "completed" ? "completed" : "delivered",
-    delivered_by_name: actorName,
-  };
-}
+    updateData = {
+      status: current.status === "completed" ? "completed" : "delivered",
+      delivered_by_name: actorName,
+      updated_at: now,
+    };
+  }
 
   if (action === "completed") {
     updateData = {
       status: "completed",
       completed_by_name: actorName,
+      updated_at: now,
     };
   }
 
   if (action === "ack" && current.type === "system_message") {
-  const old = Array.isArray(current.understoodBy)
-    ? current.understoodBy
-    : Array.isArray(current.understood_by)
-    ? current.understood_by
-    : [];
+    const old = Array.isArray(current.understoodBy)
+      ? current.understoodBy
+      : Array.isArray(current.understood_by)
+      ? current.understood_by
+      : [];
 
-  const nextUnderstood =
-    me?.id && !old.includes(me.id) ? [...old, me.id] : old;
+    const nextUnderstood =
+      me?.id && !old.includes(me.id) ? [...old, me.id] : old;
 
-  updateData.understood_by = nextUnderstood;
+    updateData.understood_by = nextUnderstood;
+    updateData.updated_at = now;
 
-  const required = Array.isArray(current.requiredUsers)
-    ? current.requiredUsers
-    : Array.isArray(current.required_users)
-    ? current.required_users
-    : [];
+    const required = Array.isArray(current.requiredUsers)
+      ? current.requiredUsers
+      : Array.isArray(current.required_users)
+      ? current.required_users
+      : [];
 
-  const allUnderstood =
-    required.length > 0 &&
-    required.every((userId) => nextUnderstood.includes(userId));
+    const allUnderstood =
+      required.length > 0 &&
+      required.every((userId) => nextUnderstood.includes(userId));
 
-  if (allUnderstood) {
-    updateData.status = "done";
-    updateData.done_by_name = actorName;
+    if (allUnderstood) {
+      updateData.status = "done";
+      updateData.done_by_name = actorName;
+    }
   }
-}
 
   const { error } = await supabase
     .from("orders")
@@ -561,19 +616,21 @@ const showInCompleted = (o) => {
 };
 
 const getMetaText = (o, section) => {
+  const actionTime = o.lastActionAt || o.updated_at || o.createdAt || o.created_at;
+
   if (section === "new") {
-    return `${formatTime(o.createdAt || o.created_at)} • ${o.createdByName || "Không rõ"}`;
+    return `${formatTime(actionTime)} • ${o.createdByName || "Không rõ"}`;
   }
   if (section === "done") {
-    return `${formatTime(o.lastActionAt || o.updated_at || o.createdAt)} • ${o.doneByName || "Không rõ"}`;
+    return `${formatTime(actionTime)} • ${o.doneByName || "Không rõ"}`;
   }
   if (section === "delivered") {
-    return `${formatTime(o.lastActionAt || o.updated_at || o.createdAt)} • ${o.deliveredByName || "Không rõ"}`;
+    return `${formatTime(actionTime)} • ${o.deliveredByName || "Không rõ"}`;
   }
   if (section === "completed") {
-    return `${formatTime(o.lastActionAt || o.updated_at || o.createdAt)} • ${o.completedByName || "Không rõ"}`;
+    return `${formatTime(actionTime)} • ${o.completedByName || "Không rõ"}`;
   }
-  return formatTime(o.lastActionAt || o.createdAt);
+  return formatTime(actionTime);
 };
 
   return (
@@ -590,6 +647,7 @@ const getMetaText = (o, section) => {
       <Header />
       <SearchBar value={q} onChange={setQ} />
       <FilterBar value={filter} onChange={setFilter} />
+
 <div
   onClick={() => navigate("/chat")}
   style={{

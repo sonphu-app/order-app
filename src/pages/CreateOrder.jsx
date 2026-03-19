@@ -1,3 +1,4 @@
+import { notifyNewOrder } from "../utils/push";
 import { supabase } from "../supabaseClient";
 import ImageEditor from "../components/ImageEditor";
 import { useState, useMemo, useEffect } from "react";
@@ -204,6 +205,13 @@ if (orderError) {
 
 const orderId = orderData.id;
 await replaceOrderImages(orderId, images);
+
+await notifyNewOrder({
+  id: orderId,
+  title: title.trim(),
+  content: content.trim(),
+});
+
 navigate("/");
 } finally {
   setSubmitting(false);

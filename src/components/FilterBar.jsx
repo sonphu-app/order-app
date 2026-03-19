@@ -37,8 +37,12 @@ export default function FilterBar({ value, onChange }) {
       <div style={styles.wrap}>
         {items.map((it) => {
           const active =
-  value === it.key ||
-  (it.key === "custom" && typeof value === "object" && value.type === "custom");
+            value === it.key ||
+            (it.key === "custom" &&
+              value &&
+              typeof value === "object" &&
+              value.type === "custom");
+
           return (
             <button
               key={it.key}
@@ -57,10 +61,18 @@ export default function FilterBar({ value, onChange }) {
       {showPicker && (
         <div style={styles.popup}>
           <div>Từ ngày</div>
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+          <input
+            type="date"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+          />
 
           <div style={{ marginTop: 8 }}>Đến ngày</div>
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+          <input
+            type="date"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+          />
 
           <button style={styles.apply} onClick={applyCustom}>
             Áp dụng

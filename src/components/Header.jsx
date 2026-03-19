@@ -1,3 +1,4 @@
+import { enablePushNotifications } from "../utils/push";
 import { useEffect, useState } from "react";
 
 export default function Header() {
@@ -18,11 +19,22 @@ export default function Header() {
   }, []);
 
   return (
-    <div style={s.wrap}>
-      <div style={s.logo}>THÉP SƠN PHÚ</div>
-      <div style={s.time}>{time}</div>
-    </div>
-  );
+  <div style={s.wrap}>
+    <div style={s.logo}>THÉP SƠN PHÚ</div>
+
+    <button
+      onClick={async () => {
+        const rs = await enablePushNotifications();
+        if (rs?.ok) alert("Đã bật thông báo cho máy này");
+      }}
+      style={s.btn}
+    >
+      Bật thông báo 🔔
+    </button>
+
+    <div style={s.time}>{time}</div>
+  </div>
+);
 }
 
 const s = {
@@ -48,4 +60,15 @@ const s = {
     color: "#a9a9a9",
     fontSize: 14,
   },
+btn: {
+  padding: "6px 10px",
+  borderRadius: 999,
+  border: "1px solid #444",
+  background: "#2ecc71",
+  color: "#111",
+  fontWeight: 700,
+  cursor: "pointer",
+  fontSize: 13,
+  whiteSpace: "nowrap",
+},
 };

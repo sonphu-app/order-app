@@ -1,3 +1,4 @@
+import { notifyOrderChat } from "../utils/push";
 import { supabase } from "../supabaseClient";
 import { useParams, useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
@@ -668,18 +669,18 @@ const S = {
 },
 
   body: {
-  marginTop: 170,   // 120 header + ~50 backBar
+  marginTop: 170,
   overflowY: "auto",
   overflowX: "hidden",
   padding: 14,
-  paddingBottom: 120
-
+  paddingBottom: 260
 },
 
   orderBox: {
     background: "#1e1e1e",
     borderRadius: 12,
-    padding: 12
+    padding: 12,
+scrollMarginTop: 170
   },
 
   orderText: {
