@@ -156,64 +156,13 @@ const afterData = {
 await supabase.from("order_edit_history").insert({
   order_id: editingOrder.id,
   editor_id: me?.id || null,
-  sender_name: me?.name || me?.username || "Không rõ",
+  editor_name: me?.name || me?.username || "Không rõ",
   action: "edit",
   before_data: beforeData,
   after_data: afterData,
 });
 
-  // 2️⃣ XÓA toàn bộ message + ảnh cũ
-  await supabase
-    .from("order_messages")
-    .delete()
-    .eq("order_id", editingOrder.id);
-let msgData = null;
-
-if (images.length > 0) {
-  const { data } = await supabase
-    .from("order_messages")
-    .insert({
-      order_id: editingOrder.id,
-      sender_id: me.id,
-      sender_name: me.name,
-      text: "",
-      seen_by: [me.id],
-      is_system: false,
-    })
-    .select()
-    .single();
-
-  msgData = data;
-}
-
-// 3️⃣ Upload ảnh mới (nếu có)
-for (let i = 0; i < images.length; i++) {
-  const base64 = images[i];
-  const blob = await (await fetch(base64)).blob();
-  const fileName = `${editingOrder.id}_${Date.now()}_${i}.png`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("order-images")
-    .upload(fileName, blob);
-
-  if (uploadError) {
-    console.log(uploadError);
-    continue;
-  }
-
-  const { data: publicUrlData } = supabase.storage
-    .from("order-images")
-    .getPublicUrl(fileName);
-
-  const publicUrl = publicUrlData.publicUrl;
-
-  if (msgData) {
-  await supabase.from("order_message_images").insert({
-    message_id: msgData.id,
-    image_url: publicUrl,
-  });
-}
-}
+ await replaceOrderImages(editingOrder.id, images);
 
   navigate(`/order/${editingOrder.id}`);
   return;
@@ -254,56 +203,7 @@ if (orderError) {
 }
 
 const orderId = orderData.id;
-let msgData = null;
-
-if (images.length > 0) {
-  const { data } = await supabase
-    .from("order_messages")
-    .insert({
-      order_id: orderId,
-      sender_id: me.id,
-      sender_name: me.name,
-      text: "",
-      seen_by: [me.id],
-      is_system: false,
-    })
-    .select()
-    .single();
-
-  msgData = data;
-}
-
-// 2) upload ảnh (nếu có)
-for (let i = 0; i < images.length; i++) {
-  const base64 = images[i];
-  const blob = await (await fetch(base64)).blob();
-  const fileName = `${orderId}_${Date.now()}_${i}.png`;
-
-  const { error: uploadError } = await supabase.storage
-    .from("order-images")
-    .upload(fileName, blob);
-
-  if (uploadError) {
-    console.log(uploadError);
-    continue;
-  }
-
-  const { data: publicUrlData } = supabase.storage
-    .from("order-images")
-    .getPublicUrl(fileName);
-
-  const publicUrl = publicUrlData.publicUrl;
-
-  // tạo 1 message để gắn ảnh
-
-  if (msgData) {
-    await supabase.from("order_message_images").insert({
-      message_id: msgData.id,
-      image_url: publicUrl,
-    });
-  }
-}
-
+await replaceOrderImages(orderId, images);
 navigate("/");
 } finally {
   setSubmitting(false);
