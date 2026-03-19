@@ -92,6 +92,8 @@ console.log("HOME REALTIME VERSION 1");
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("today");
 const [users, setUsers] = useState([]);
+const [orderUnreadMap, setOrderUnreadMap] = useState({});
+const [groupUnreadCount, setGroupUnreadCount] = useState(0);
 
   // map snake_case -> camelCase cho UI
   const normalizeOrder = (row) => ({
@@ -116,6 +118,55 @@ const loadUsersSupabase = async () => {
   }
 
   setUsers(data || []);
+};
+const loadOrderUnreadCounts = async () => {
+  const me = getCurrentUser();
+  if (!me?.id) return;
+
+  const { data, error } = await supabase
+    .from("order_messages")
+    .select("id, order_id, sender_id, seen_by");
+
+  if (error) {
+    console.log("LOAD ORDER UNREAD ERROR:", error);
+    return;
+  }
+
+  const map = {};
+
+  (data || []).forEach((m) => {
+    const isMine = m.sender_id === me.id;
+    const seenBy = Array.isArray(m.seen_by) ? m.seen_by : [];
+    const unread = !isMine && !seenBy.includes(me.id);
+
+    if (unread) {
+      map[m.order_id] = (map[m.order_id] || 0) + 1;
+    }
+  });
+
+  setOrderUnreadMap(map);
+};
+
+const loadGroupUnreadCount = async () => {
+  const me = getCurrentUser();
+  if (!me?.id) return;
+
+  const { data, error } = await supabase
+    .from("group_messages")
+    .select("id, sender_id, seen_by");
+
+  if (error) {
+    console.log("LOAD GROUP UNREAD ERROR:", error);
+    return;
+  }
+
+  const count = (data || []).filter((m) => {
+    const isMine = m.sender_id === me.id;
+    const seenBy = Array.isArray(m.seen_by) ? m.seen_by : [];
+    return !isMine && !seenBy.includes(me.id);
+  }).length;
+
+  setGroupUnreadCount(count);
 };
 const getUserName = (id) => {
   const u = users.find((x) => x.id === id);
@@ -159,14 +210,16 @@ setOrders(rows);
   useEffect(() => {
   const run = async () => {
     await refreshCurrentUser();
-    loadOrdersSupabase();
-    loadUsersSupabase();
+    await loadOrdersSupabase();
+    await loadUsersSupabase();
+    await loadOrderUnreadCounts();
+    await loadGroupUnreadCount();
   };
   run();
 }, []);
 useEffect(() => {
   const channel = supabase
-    .channel("orders-realtime")
+    .channel("home-realtime")
     .on(
       "postgres_changes",
       {
@@ -176,6 +229,28 @@ useEffect(() => {
       },
       () => {
         loadOrdersSupabase();
+      }
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "order_messages",
+      },
+      () => {
+        loadOrderUnreadCounts();
+      }
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "group_messages",
+      },
+      () => {
+        loadGroupUnreadCount();
       }
     )
     .subscribe();
@@ -368,7 +443,31 @@ const updateOrder = async (id, action) => {
         style={{ ...S.card, background: getCardColor(o) }}
         onClick={() => navigate(`/order/${o.id}`)}
       >
-        <div style={S.cardContent}>
+        <div style={{ ...S.cardContent, position: "relative" }}>
+{(orderUnreadMap[o.id] || 0) > 0 && (
+  <div
+    style={{
+      position: "absolute",
+      top: -6,
+      right: -6,
+      minWidth: 26,
+      height: 26,
+      borderRadius: 999,
+      background: "#ff3b30",
+      color: "#fff",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 12,
+      fontWeight: 700,
+      padding: "0 8px",
+      boxShadow: "0 0 0 3px rgba(255,255,255,0.08)",
+      animation: "pulseBadge 1s infinite",
+    }}
+  >
+    {orderUnreadMap[o.id]}
+  </div>
+)}
           {o.type === "system_message" && (
             <div style={S.systemHeader}>📢 TIN NHẮN HỆ THỐNG</div>
           )}
@@ -479,9 +578,51 @@ const getMetaText = (o, section) => {
 
   return (
     <div style={S.app}>
+<style>
+  {`
+    @keyframes pulseBadge {
+      0% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.08); opacity: 0.75; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+  `}
+</style>
       <Header />
       <SearchBar value={q} onChange={setQ} />
       <FilterBar value={filter} onChange={setFilter} />
+<div
+  onClick={() => navigate("/chat")}
+  style={{
+    margin: "10px 0 16px",
+    padding: "10px 14px",
+    borderRadius: 12,
+    background: groupUnreadCount > 0 ? "#7a1f1f" : "#1f1f1f",
+    border: "1px solid #444",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    cursor: "pointer",
+    animation: groupUnreadCount > 0 ? "pulseBadge 1s infinite" : "none",
+  }}
+>
+  <div style={{ fontWeight: 700 }}>💬 Chat nhóm</div>
+  <div
+    style={{
+      minWidth: 28,
+      height: 28,
+      borderRadius: 999,
+      background: groupUnreadCount > 0 ? "#ff3b30" : "#333",
+      color: "#fff",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontWeight: 700,
+      padding: "0 8px",
+    }}
+  >
+    {groupUnreadCount}
+  </div>
+</div>
 
       {/* 🔴 ĐƠN MỚI */}
       <div style={S.section}>Đơn mới</div>
