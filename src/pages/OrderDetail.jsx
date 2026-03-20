@@ -216,31 +216,37 @@ useEffect(() => {
     }
 
     for (let i = 0; i < images.length; i++) {
-      const base64 = images[i];
-      const blob = await (await fetch(base64)).blob();
-      const fileName = `${msgData.id}_${Date.now()}_${i}.png`;
+  const base64 = images[i];
+  const blob = await (await fetch(base64)).blob();
+  const fileName = `${msgData.id}_${Date.now()}_${i}.png`;
 
-      const { error: uploadError } = await supabase.storage
-        .from("order-images")
-        .upload(fileName, blob);
+  const { error: uploadError } = await supabase.storage
+    .from("order-images")
+    .upload(fileName, blob);
 
-      if (uploadError) {
-        console.log("UPLOAD CHAT IMG ERROR:", uploadError);
-        continue;
-      }
+  if (uploadError) {
+    console.log("UPLOAD CHAT IMG ERROR:", uploadError);
+    continue;
+  }
 
-      const { data: publicUrlData } = supabase.storage
-        .from("order-images")
-        .getPublicUrl(fileName);
+  const { data: publicUrlData } = supabase.storage
+    .from("order-images")
+    .getPublicUrl(fileName);
 
-      await supabase.from("order_message_images").insert({
-        message_id: msgData.id,
-        image_url: publicUrlData.publicUrl,
-      });
-    }
+  await supabase.from("order_message_images").insert({
+    message_id: msgData.id,
+    image_url: publicUrlData.publicUrl,
+  });
+}
 
-    setText("");
-    setImages([]);
+await notifyOrderChat({
+  order,
+  text: text.trim(),
+  imageCount: images.length,
+});
+
+setText("");
+setImages([]);
 
     setTimeout(() => {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
