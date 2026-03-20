@@ -205,7 +205,7 @@ if (orderError) {
 
 const orderId = orderData.id;
 await replaceOrderImages(orderId, images);
-
+console.log("🔥 CALL PUSH");
 await notifyNewOrder({
   id: orderId,
   title: title.trim(),
