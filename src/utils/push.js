@@ -1,7 +1,7 @@
 import { supabase } from "../supabaseClient";
 import { getCurrentUser } from "./auth";
 
-const VAPID_PUBLIC_KEY = "DAN_PUBLIC_KEY_CUA_BAN_VAO_DAY";
+const VAPID_PUBLIC_KEY = "BPrMZ79NcpeFTx5oYrWeGGe5d-mUPDsnkyJ3gV6gKZQrCmdxFSkJy6zuWCdI9HlUPHha3AUVfvVkTkg_gfC4Eeg";
 
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -80,12 +80,13 @@ export async function enablePushNotifications() {
     .from("push_subscriptions")
     .upsert(payload, { onConflict: "endpoint" });
 
-  if (error) {
+    if (error) {
     console.log("SAVE PUSH SUBSCRIPTION ERROR:", error);
-    alert("Lưu thiết bị nhận thông báo lỗi");
-    return { ok: false, reason: "save_failed" };
+    alert("Lưu thiết bị nhận thông báo lỗi: " + (error.message || "unknown"));
+    return { ok: false, reason: "save_failed", error };
   }
 
+  console.log("SAVE PUSH SUBSCRIPTION OK");
   return { ok: true };
 }
 
