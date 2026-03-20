@@ -124,9 +124,14 @@ function compactOrderLabel(order = {}) {
 }
 
 export async function sendPushEvent(payload) {
+  console.log("sendPushEvent START =", payload);
+
   const { data, error } = await supabase.functions.invoke("push", {
     body: payload,
   });
+
+  console.log("sendPushEvent DATA =", data);
+  console.log("sendPushEvent ERROR =", error);
 
   if (error) {
     console.log("SEND PUSH EVENT ERROR:", error);
@@ -138,9 +143,16 @@ export async function sendPushEvent(payload) {
 
 export async function notifyNewOrder(order) {
   const me = getCurrentUser();
-  if (!me?.id || !order?.id) return;
 
-  return sendPushEvent({
+  console.log("notifyNewOrder me =", me);
+  console.log("notifyNewOrder order =", order);
+
+  if (!me?.id || !order?.id) {
+    console.log("notifyNewOrder STOP: missing me.id or order.id");
+    return null;
+  }
+
+  const payload = {
     type: "new_order",
     actorId: me.id,
     actorName: me.name || me.username || "Không rõ",
@@ -148,7 +160,11 @@ export async function notifyNewOrder(order) {
     body: compactOrderLabel(order),
     url: `/order/${order.id}`,
     orderId: order.id,
-  });
+  };
+
+  console.log("notifyNewOrder PAYLOAD =", payload);
+
+  return sendPushEvent(payload);
 }
 
 export async function notifyOrderChat({ order, text, imageCount = 0 }) {
