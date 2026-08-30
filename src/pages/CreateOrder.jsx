@@ -1,10 +1,13 @@
 import { notifyNewOrder } from "../utils/push";
 import { supabase } from "../supabaseClient";
-import ImageEditor from "../components/ImageEditor";
-import { useState, useMemo, useEffect } from "react";
+import { lazy, Suspense } from "react";
+
+const ImageEditor = lazy(() => import("../components/ImageEditor"));
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { getCurrentUser } from "../utils/auth";
 import { useLocation } from "react-router-dom";
+import { publishSyncEvent, putLocal } from "../utils/localSync";
 
 // tạo id đơn giản
 
@@ -64,7 +67,7 @@ async function uploadOneImage(fileBase64, fileName) {
     .from("order-images")
     .getPublicUrl(fileName);
 
-  return publicUrlData.publicUrl;
+  return { url: publicUrlData.publicUrl, storagePath: fileName };
 }
 
 async function replaceOrderImages(orderId, imageList) {
@@ -77,21 +80,34 @@ async function replaceOrderImages(orderId, imageList) {
   const rows = [];
 
   for (let i = 0; i < imageList.length; i++) {
-    const url = await uploadOneImage(
+    const uploaded = await uploadOneImage(
       imageList[i],
       `${orderId}_${Date.now()}_${i}.png`
     );
 
-    if (url) {
+    if (uploaded) {
       rows.push({
         order_id: orderId,
-        image_url: url,
+        image_url: uploaded.url,
+        storage_path: uploaded.storagePath,
       });
     }
   }
 
   if (rows.length > 0) {
-    await supabase.from("order_images").insert(rows);
+    const insertRows = rows.map((row) => ({
+      order_id: row.order_id,
+      image_url: row.image_url,
+    }));
+    const { data: savedRows } = await supabase.from("order_images").insert(insertRows).select();
+    for (let i = 0; i < (savedRows || []).length; i++) {
+      await publishSyncEvent({
+        entityType: "order_image",
+        entityId: savedRows[i].id,
+        payload: savedRows[i],
+        storagePaths: [rows[i].storage_path],
+      });
+    }
   }
 }
 
@@ -140,6 +156,19 @@ if (editingOrder) {
     alert("Lỗi sửa đơn");
     return;
   }
+const updatedOrder = {
+  ...editingOrder,
+  title: title.trim(),
+  content: content.trim(),
+  status: "new",
+  has_image: images.length > 0,
+  done_by_name: "",
+  delivered_by_name: "",
+  completed_by_name: "",
+  updated_at: new Date().toISOString(),
+};
+await putLocal("orders", updatedOrder);
+await publishSyncEvent({ entityType: "order", entityId: editingOrder.id, payload: updatedOrder });
 const beforeData = {
   title: editingOrder.title || "",
   content: editingOrder.content || editingOrder.text || "",
@@ -204,6 +233,8 @@ if (orderError) {
 }
 
 const orderId = orderData.id;
+await putLocal("orders", orderData);
+await publishSyncEvent({ entityType: "order", entityId: orderId, payload: orderData });
 await replaceOrderImages(orderId, images);
 console.log("🔥 CALL PUSH");
 await notifyNewOrder({
@@ -320,7 +351,7 @@ navigate("/");
 
 {/* ===== IMAGE EDITOR POPUP ===== */}
 {editingIndex !== null && (
-  <ImageEditor
+  <Suspense fallback={null}><ImageEditor
     src={images[editingIndex]}
     onSave={(newImg) => {
       setImages(prev =>
@@ -331,7 +362,7 @@ navigate("/");
       setEditingIndex(null);
     }}
     onClose={() => setEditingIndex(null)}
-  />
+  /></Suspense>
 )}
 
 <div style={S.actions}>

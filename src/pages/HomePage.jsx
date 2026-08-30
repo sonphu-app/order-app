@@ -10,6 +10,7 @@ import FilterBar from "../components/FilterBar";
 import BottomNav from "../components/BottomNav";
 import { hasPermission, PERMISSIONS } from "../utils/permissions";
 import { getCurrentUser } from "../utils/auth";
+import { deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
 function formatTime(date) {
   const d = new Date(date);
   const hh = String(d.getHours()).padStart(2, "0");
@@ -175,6 +176,11 @@ const getUserName = (id) => {
 };
   // ✅ LOAD từ Supabase (CHỈ SELECT, KHÔNG UPDATE Ở ĐÂY)
   const loadOrdersSupabase = async () => {
+    const cached = await getAllLocal("orders");
+    if (cached.length > 0) {
+      setOrders(cached.map(normalizeOrder));
+    }
+
     const { data, error } = await supabase
       .from("orders")
       .select("*")
@@ -185,7 +191,10 @@ const getUserName = (id) => {
       return;
     }
 
-    let rows = (data || []).map(normalizeOrder);
+    const cachedById = new Map(cached.map((row) => [row.id, row]));
+    (data || []).forEach((row) => cachedById.set(row.id, row));
+    let rows = [...cachedById.values()].map(normalizeOrder);
+    await putManyLocal("orders", data || []);
 
 // tạo weekly task ở client nếu đã qua mốc và chưa có
 const created = await ensureWeeklySystemTask(rows);
@@ -201,7 +210,9 @@ if (created) {
     return;
   }
 
-  rows = (reloadData || []).map(normalizeOrder);
+  (reloadData || []).forEach((row) => cachedById.set(row.id, row));
+  await putManyLocal("orders", reloadData || []);
+  rows = [...cachedById.values()].map(normalizeOrder);
 }
 
 setOrders(rows);
@@ -229,8 +240,20 @@ useEffect(() => {
         schema: "public",
         table: "orders",
       },
-      () => {
-        loadOrdersSupabase();
+      async (payload) => {
+        if (payload.eventType === "DELETE") {
+          await deleteLocal("orders", payload.old.id);
+          setOrders((current) => current.filter((order) => order.id !== payload.old.id));
+          return;
+        }
+        await putLocal("orders", payload.new);
+        const next = normalizeOrder(payload.new);
+        setOrders((current) => {
+          const exists = current.some((order) => order.id === next.id);
+          return exists
+            ? current.map((order) => order.id === next.id ? next : order)
+            : [next, ...current];
+        });
       }
     )
     .on(
@@ -260,6 +283,15 @@ useEffect(() => {
   return () => {
     supabase.removeChannel(channel);
   };
+}, []);
+useEffect(() => {
+  const refreshFromLocal = async (event) => {
+    if (event.detail?.entity_type !== "order") return;
+    const cached = await getAllLocal("orders");
+    setOrders(cached.map(normalizeOrder));
+  };
+  window.addEventListener("sonphu-local-sync", refreshFromLocal);
+  return () => window.removeEventListener("sonphu-local-sync", refreshFromLocal);
 }, []);
   // ===== LỌC THEO THỜI GIAN =====
 const today = new Date();
@@ -374,6 +406,10 @@ const togglePin = async (id) => {
 
   if (error) console.log("PIN ERROR:", error);
 
+  const nextOrder = { ...current, pinned: !current.pinned, updated_at: new Date().toISOString() };
+  await putLocal("orders", nextOrder);
+  await publishSyncEvent({ entityType: "order", entityId: id, payload: nextOrder });
+
   await loadOrdersSupabase();
 };
 
@@ -457,6 +493,10 @@ const updateOrder = async (id, action) => {
     .eq("id", id);
 
   if (error) console.log("UPDATE ERROR:", error);
+
+  const nextOrder = { ...current, ...updateData };
+  await putLocal("orders", nextOrder);
+  await publishSyncEvent({ entityType: "order", entityId: id, payload: nextOrder });
 
   await loadOrdersSupabase();
 };

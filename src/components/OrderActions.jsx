@@ -2,6 +2,7 @@ import { supabase } from "../supabaseClient";
 import { useNavigate } from "react-router-dom";
 import { hasPermission, PERMISSIONS } from "../utils/permissions";
 import { getCurrentUser } from "../utils/auth";
+import { publishSyncEvent, putLocal } from "../utils/localSync";
 
 export default function OrderActions({ order, onUpdated }) {
   const navigate = useNavigate();
@@ -24,6 +25,8 @@ export default function OrderActions({ order, onUpdated }) {
     }
 
     onUpdated?.(data);
+    await putLocal("orders", data);
+    await publishSyncEvent({ entityType: "order", entityId: order.id, payload: data });
 
     if (goHome) {
       navigate("/", { replace: true });
@@ -48,6 +51,8 @@ export default function OrderActions({ order, onUpdated }) {
       console.log("DELETE ORDER ERROR:", error);
       return;
     }
+
+    await publishSyncEvent({ entityType: "order", entityId: order.id, operation: "delete" });
 
     navigate("/", { replace: true });
   }

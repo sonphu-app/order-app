@@ -1,10 +1,14 @@
 // CHỈ DÁN - KHÔNG SỬA LINH TINH
 import { notifyGroupChat } from "../utils/push";
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { lazy, Suspense, useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "../supabaseClient";
-import ImageEditor from "../components/ImageEditor";
 import "../styles/chat.css";
 import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
+import { cacheImage, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
+import { createImagePreviewBlob } from "../utils/imagePreview";
+import { useNavigate } from "react-router-dom";
+
+const ImageEditor = lazy(() => import("../components/ImageEditor"));
 
 function format(ts) {
   return ts ? new Date(ts).toLocaleString() : "";
@@ -17,12 +21,13 @@ export default function Chat() {
   const [attachments, setAttachments] = useState([]);
   const [editingIndex, setEditingIndex] = useState(null);
   const [viewer, setViewer] = useState(null);
-  const [sending, setSending] = useState(false);
   const [groupUnreadCount, setGroupUnreadCount] = useState(0);
 
   const inputRef = useRef(null);
   const bottomRef = useRef(null);
   const msgListRef = useRef(null);
+  const reloadTimerRef = useRef(null);
+  const navigate = useNavigate();
 
   const me = getCurrentUser();
 
@@ -53,13 +58,27 @@ export default function Chat() {
   }, []);
 
   // ===== LOAD CHAT =====
-  const loadChat = useCallback(async () => {
+  const loadChat = useCallback(async ({ remote = true } = {}) => {
+    const localMessages = await getAllLocal("groupMessages");
+    const localImages = await getAllLocal("groupMessageImages");
+    if (localMessages.length > 0) {
+      setMessages(localMessages.map((message) => ({
+        ...message,
+        images: localImages
+          .filter((image) => String(image.message_id) === String(message.id))
+          .map((image) => image.local_image_url || image.image_url),
+      })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
+    }
+
+    if (!remote) return;
+
     const { data } = await supabase
       .from("group_messages")
       .select("*")
       .order("created_at", { ascending: true });
 
     const safeData = data || [];
+    await putManyLocal("groupMessages", safeData);
     const ids = safeData.map((m) => m.id);
 
     let imgs = [];
@@ -69,15 +88,24 @@ export default function Chat() {
         .select("*")
         .in("message_id", ids);
 
-      imgs = imgData || [];
+      imgs = await Promise.all((imgData || []).map(async (row) => ({
+        ...row,
+        local_image_url: await cacheImage(row.image_url),
+      })));
+      await putManyLocal("groupMessageImages", imgs);
     }
 
-    const merged = safeData.map((m) => ({
+    const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
+    safeData.forEach((message) => messageMap.set(String(message.id), message));
+    const imageMap = new Map(localImages.map((image) => [String(image.id), image]));
+    imgs.forEach((image) => imageMap.set(String(image.id), image));
+    const allImages = [...imageMap.values()];
+    const merged = [...messageMap.values()].map((m) => ({
       ...m,
-      images: imgs
-        .filter((i) => i.message_id === m.id)
-        .map((i) => i.image_url)
-    }));
+      images: allImages
+        .filter((i) => String(i.message_id) === String(m.id))
+        .map((i) => i.local_image_url || i.image_url)
+    })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
     setMessages(merged);
   }, []);
@@ -116,29 +144,42 @@ export default function Chat() {
 
   // ===== REALTIME =====
   useEffect(() => {
+    const refresh = (includeUnread = false) => {
+      clearTimeout(reloadTimerRef.current);
+      reloadTimerRef.current = setTimeout(async () => {
+        await loadChat();
+        if (includeUnread) await loadUnread();
+        scrollToBottom(true);
+      }, 120);
+    };
     const channel = supabase
       .channel("group-chat")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "group_messages" },
-        async () => {
-          await loadChat();
-          await loadUnread();
-          setTimeout(() => scrollToBottom(true), 50);
-        }
+        () => refresh(true)
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "group_message_images" },
-        async () => {
-          await loadChat();
-          setTimeout(() => scrollToBottom(true), 50);
-        }
+        () => refresh(false)
       )
       .subscribe();
 
-    return () => supabase.removeChannel(channel);
+    return () => {
+      clearTimeout(reloadTimerRef.current);
+      supabase.removeChannel(channel);
+    };
   }, [loadChat, loadUnread, scrollToBottom]);
+
+  useEffect(() => {
+    const refreshFromLocal = (event) => {
+      if (!String(event.detail?.entity_type || "").startsWith("group_")) return;
+      loadChat({ remote: false });
+    };
+    window.addEventListener("sonphu-local-sync", refreshFromLocal);
+    return () => window.removeEventListener("sonphu-local-sync", refreshFromLocal);
+  }, [loadChat]);
 
   // ===== AUTO SCROLL WHEN MESSAGES CHANGE =====
   useEffect(() => {
@@ -168,21 +209,28 @@ export default function Chat() {
 
   // ===== SEND =====
   async function send() {
-    if (sending) return;
     if (!text.trim() && attachments.length === 0) return;
 
     const me = getCurrentUser();
     if (!me) return;
 
-    setSending(true);
-
-    const sendingText = text;
+    const sendingText = text.trim();
     const sendingAttachments = [...attachments];
+    const optimisticId = `local-${crypto.randomUUID()}`;
 
+    setMessages((current) => [...current, {
+      id: optimisticId,
+      sender_id: me.id,
+      sender_name: me.name,
+      text: sendingText,
+      seen_by: [me.id],
+      created_at: new Date().toISOString(),
+      images: sendingAttachments,
+    }]);
     setText("");
     setAttachments([]);
-
     scrollToBottom(false);
+    requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
 
     const { data: msg } = await supabase
       .from("group_messages")
@@ -195,28 +243,74 @@ export default function Chat() {
       .select()
       .single();
 
-        for (let i = 0; i < sendingAttachments.length; i++) {
-      const blob = await (await fetch(sendingAttachments[i])).blob();
-      const name = `group_${msg.id}_${i}_${Date.now()}.png`;
+    if (!msg) {
+      setMessages((current) => current.filter((message) => message.id !== optimisticId));
+      setText(sendingText);
+      setAttachments(sendingAttachments);
+      return;
+    }
+    setMessages((current) => current.map((message) => (
+      message.id === optimisticId ? { ...msg, images: sendingAttachments } : message
+    )));
+    await putLocal("groupMessages", msg);
+    await publishSyncEvent({ entityType: "group_message", entityId: msg.id, payload: msg });
 
-      await supabase.storage.from("order-images").upload(name, blob);
+    await Promise.all(sendingAttachments.map(async (source, i) => {
+      const blob = await (await fetch(source)).blob();
+      const stamp = Date.now();
+      const name = `group_${msg.id}_${i}_${stamp}.jpg`;
+      const previewName = `group_${msg.id}_${i}_${stamp}_preview.jpg`;
+      const previewBlob = await createImagePreviewBlob(source);
+
+      const { error: previewError } = await supabase.storage.from("order-images").upload(previewName, previewBlob, {
+        contentType: "image/jpeg",
+        cacheControl: "31536000",
+      });
+
+      let savedImage = null;
+      if (!previewError) {
+        const { data: previewUrl } = supabase.storage.from("order-images").getPublicUrl(previewName);
+        const { data: previewRow } = await supabase.from("group_message_images").insert({
+          message_id: msg.id,
+          image_url: previewUrl.publicUrl,
+        }).select().single();
+        savedImage = previewRow;
+        if (savedImage) await publishSyncEvent({
+          entityType: "group_message_image",
+          entityId: savedImage.id,
+          payload: savedImage,
+          storagePaths: [previewName],
+        });
+      }
+
+      const { error: uploadError } = await supabase.storage.from("order-images").upload(name, blob, {
+        contentType: "image/jpeg",
+        cacheControl: "31536000",
+      });
+      if (uploadError) return;
 
       const { data } = supabase.storage
         .from("order-images")
         .getPublicUrl(name);
 
-      await supabase.from("group_message_images").insert({
-        message_id: msg.id,
-        image_url: data.publicUrl
-      });
-    }
+      const write = savedImage
+        ? supabase.from("group_message_images").update({ image_url: data.publicUrl }).eq("id", savedImage.id).select().single()
+        : supabase.from("group_message_images").insert({ message_id: msg.id, image_url: data.publicUrl }).select().single();
+      const { data: finalImage } = await write;
+      if (finalImage) {
+        await publishSyncEvent({
+          entityType: "group_message_image",
+          entityId: finalImage.id,
+          payload: finalImage,
+          storagePaths: [name],
+        });
+      }
+    }));
 
-    await notifyGroupChat({
+    void notifyGroupChat({
       text: sendingText,
       imageCount: sendingAttachments.length,
-    });
-
-    setSending(false);
+    }).catch((error) => console.log("NOTIFY GROUP CHAT ERROR:", error));
 
     setTimeout(() => {
       scrollToBottom(true);
@@ -234,7 +328,8 @@ export default function Chat() {
   return (
     <div className="chatPage">
       <div className="chatHeader">
-        CHAT NỘI BỘ
+        <button className="chatBack" onClick={() => navigate("/")} aria-label="Về trang chính">‹</button>
+        <div className="chatTitle"><strong>Chat nội bộ</strong><small>{users.length} thành viên</small></div>
         <span
           style={{
             marginLeft: 10,
@@ -297,6 +392,13 @@ export default function Chat() {
             <div key={i} className="previewBox">
               <img src={img} alt="" />
               <button
+                type="button"
+                className="previewEdit"
+                onClick={() => setEditingIndex(i)}
+              >
+                Sửa
+              </button>
+              <button
                 className="previewRemove"
                 onClick={() =>
                   setAttachments((prev) => prev.filter((_, idx) => idx !== i))
@@ -313,7 +415,7 @@ export default function Chat() {
         <textarea
           ref={inputRef}
           value={text}
-          rows={2}
+          rows={1}
           placeholder="Nhập tin nhắn..."
           onChange={(e) => setText(e.target.value)}
           onFocus={() => setTimeout(() => scrollToBottom(true), 100)}
@@ -322,10 +424,14 @@ export default function Chat() {
         />
 
         <div className="composerRow">
-          <input
-            type="file"
-            multiple
-            onChange={(e) => {
+          <label className="attachButton" aria-label="Chọn ảnh">
+            ＋
+            <input
+              className="fileInput"
+              type="file"
+              multiple
+              accept="image/*"
+              onChange={(e) => {
               const files = Array.from(e.target.files || []);
               files.forEach((f) => {
                 const reader = new FileReader();
@@ -335,14 +441,30 @@ export default function Chat() {
               });
 
               setTimeout(() => scrollToBottom(true), 100);
-            }}
-          />
+              }}
+            />
+          </label>
 
-          <button onClick={send} disabled={sending}>
-            {sending ? "..." : "Gửi"}
+          <button className="sendButton" onClick={send} aria-label="Gửi tin nhắn">
+            ➤
           </button>
         </div>
       </div>
+
+      {editingIndex !== null && attachments[editingIndex] && (
+        <Suspense fallback={null}><ImageEditor
+          src={attachments[editingIndex]}
+          onClose={() => setEditingIndex(null)}
+          onSave={(editedImage) => {
+            setAttachments((current) =>
+              current.map((image, index) =>
+                index === editingIndex ? editedImage : image
+              )
+            );
+            setEditingIndex(null);
+          }}
+        /></Suspense>
+      )}
 
       {viewer && (
         <div className="viewer">
