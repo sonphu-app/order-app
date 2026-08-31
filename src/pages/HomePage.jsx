@@ -1,4 +1,4 @@
-import { enablePushNotifications, syncPushHeartbeat } from "../utils/push";
+import { syncPushHeartbeat } from "../utils/push";
 import { refreshCurrentUser } from "../utils/auth";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../supabaseClient";
@@ -11,6 +11,7 @@ import BottomNav from "../components/BottomNav";
 import { hasPermission, PERMISSIONS } from "../utils/permissions";
 import { getCurrentUser } from "../utils/auth";
 import { deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
+import { notifyNewOrder } from "../utils/push";
 function formatTime(date) {
   const d = new Date(date);
   const hh = String(d.getHours()).padStart(2, "0");
@@ -20,13 +21,32 @@ function formatTime(date) {
   return `${dd}/${MM} ${hh}:${mm}`;
 }
 
-// 🎨 màu theo trạng thái
-const getCardColor = (o) => {
-  if (o.status === "completed") return "#3a3a3a";
-  if (o.status === "delivered") return "#1f7a4d";
-  if (o.status === "done") return "#cc7a00";
-  return "#6f5a1a";
+const HOME_VIEW_KEY = "sonphu-home-view";
+let homeMemory = {
+  orders: [],
+  orderUnreadMap: {},
+  groupUnreadCount: 0,
+  loadedAt: 0,
 };
+
+function readHomeView() {
+  try {
+    return JSON.parse(sessionStorage.getItem(HOME_VIEW_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveHomeView(next) {
+  try {
+    sessionStorage.setItem(HOME_VIEW_KEY, JSON.stringify(next));
+  } catch {
+    // Trình duyệt chặn sessionStorage thì app vẫn hoạt động bằng bộ nhớ tạm.
+  }
+}
+
+// Thẻ dùng một màu trung tính; trạng thái đã được tách thành từng tab riêng.
+const getCardColor = () => "#202020";
 // 🔘 BUTTON
 const Btn = ({ children, onClick, active }) => (
   <button
@@ -58,7 +78,7 @@ const S = {
     minHeight: "100dvh",
     background: "#121212",
     padding: 14,
-    paddingBottom: 90,
+    paddingBottom: 205,
     color: "white",
   },
   section: { fontSize: 26, fontWeight: 800, margin: "20px 0 10px" },
@@ -85,17 +105,115 @@ const S = {
     wordBreak: "break-word",
     overflowWrap: "anywhere",
   },
+  statusBar: {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 68,
+    zIndex: 19,
+    height: 58,
+    display: "grid",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    background: "#161616",
+    borderTop: "1px solid #343434",
+    padding: "6px",
+    gap: 4,
+  },
+  quickBar: {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 126,
+    zIndex: 19,
+    height: 52,
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+    background: "#161616",
+    borderTop: "1px solid #343434",
+    padding: "7px 10px",
+    boxSizing: "border-box",
+  },
+  quickInput: {
+    flex: 1,
+    minWidth: 0,
+    height: 36,
+    borderRadius: 10,
+    border: "1px solid #444",
+    background: "#242424",
+    color: "#fff",
+    padding: "0 11px",
+  },
+  quickButton: {
+    height: 36,
+    border: 0,
+    borderRadius: 10,
+    background: "#2ecc71",
+    color: "#111",
+    fontWeight: 800,
+    padding: "0 14px",
+  },
+  statusTab: (active) => ({
+    minWidth: 0,
+    border: active ? "1px solid #d9d9d9" : "1px solid transparent",
+    borderRadius: 10,
+    background: active ? "#f1f1f1" : "transparent",
+    color: active ? "#111" : "#bcbcbc",
+    fontSize: 11,
+    fontWeight: 750,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    padding: "5px 3px",
+    cursor: "pointer",
+  }),
+  statusCount: {
+    minWidth: 18,
+    height: 18,
+    padding: "0 4px",
+    borderRadius: 999,
+    background: "#d83a3a",
+    color: "white",
+    fontSize: 10,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
 };
 
 export default function Home() {
 const navigate = useNavigate();
 console.log("HOME REALTIME VERSION 1");
-  const [orders, setOrders] = useState([]);
-  const [q, setQ] = useState("");
-  const [filter, setFilter] = useState(null);
+  const savedView = useMemo(() => readHomeView(), []);
+  const [orders, setOrders] = useState(() => homeMemory.orders);
+  const [q, setQ] = useState(() => savedView.q || "");
+  const [filter, setFilter] = useState(() => savedView.filter ?? null);
+  const [quickText, setQuickText] = useState("");
+  const [quickSubmitting, setQuickSubmitting] = useState(false);
+  const [statusTab, setStatusTab] = useState(() => savedView.statusTab || "new");
 const [users, setUsers] = useState([]);
-const [orderUnreadMap, setOrderUnreadMap] = useState({});
-const [groupUnreadCount, setGroupUnreadCount] = useState(0);
+const [orderUnreadMap, setOrderUnreadMap] = useState(() => homeMemory.orderUnreadMap);
+const [groupUnreadCount, setGroupUnreadCount] = useState(() => homeMemory.groupUnreadCount);
+const restoredScrollRef = useRef(false);
+
+useEffect(() => {
+  homeMemory = { ...homeMemory, orders, orderUnreadMap, groupUnreadCount };
+}, [orders, orderUnreadMap, groupUnreadCount]);
+
+useEffect(() => {
+  saveHomeView({ q, filter, statusTab, scrollY: window.scrollY });
+}, [q, filter, statusTab]);
+
+useEffect(() => {
+  if (restoredScrollRef.current || orders.length === 0) return;
+  restoredScrollRef.current = true;
+  requestAnimationFrame(() => window.scrollTo({ top: Number(savedView.scrollY) || 0, behavior: "auto" }));
+}, [orders.length, savedView.scrollY]);
+
+useEffect(() => () => {
+  saveHomeView({ q, filter, statusTab, scrollY: window.scrollY });
+}, [q, filter, statusTab]);
 
   // map snake_case -> camelCase cho UI
   const normalizeOrder = (row) => ({
@@ -108,6 +226,9 @@ const [groupUnreadCount, setGroupUnreadCount] = useState(0);
   deliveredByName: row.delivered_by_name || "",
   completedByName: row.completed_by_name || "",
   createdByName: row.created_by_name || "",
+  doneAt: row.done_at || null,
+  deliveredAt: row.delivered_at || null,
+  completedAt: row.completed_at || null,
 });
 const loadUsersSupabase = async () => {
   const { data, error } = await supabase
@@ -216,13 +337,18 @@ if (created) {
 }
 
 setOrders(rows);
+homeMemory.loadedAt = Date.now();
 
   };
 
   useEffect(() => {
   const run = async () => {
     await refreshCurrentUser();
-    await loadOrdersSupabase();
+    if (Date.now() - homeMemory.loadedAt > 30_000) await loadOrdersSupabase();
+    else {
+      const cached = await getAllLocal("orders");
+      if (cached.length) setOrders(cached.map(normalizeOrder));
+    }
     await loadUsersSupabase();
     await loadOrderUnreadCounts();
     await loadGroupUnreadCount();
@@ -297,9 +423,6 @@ useEffect(() => {
 const today = new Date();
 today.setHours(0, 0, 0, 0);
 
-const threeDaysAgo = new Date(today);
-threeDaysAgo.setDate(today.getDate() - 2);
-
 const yesterday = new Date(today);
 yesterday.setDate(today.getDate() - 1);
 
@@ -312,46 +435,26 @@ let timeFiltered = orders;
 const safeFilterTime = (o) =>
   new Date(o.lastActionAt || o.updated_at || o.createdAt || o.created_at || 0);
 
-// MỞ APP: không nút nào sáng, nhưng hiện 3 ngày gần nhất
+const shouldAlwaysShow = (o) => {
+  const system = o.type === "system_task" || o.type === "system_message";
+  if (system) return o.status !== "completed";
+  return o.status !== "completed" || !o.deliveredByName;
+};
+
+// MỞ APP: đơn chưa hoàn tất luôn hiện; đơn hoàn tất mặc định chỉ hiện hôm nay.
 if (filter === null) {
   timeFiltered = orders.filter((o) => {
-    const isCompletedButNotDelivered =
-      o.status === "completed" && !o.deliveredByName;
-
-    const shouldAlwaysShow = (() => {
-  const isSystem = o.type === "system_task" || o.type === "system_message";
-
-  if (isSystem) {
-    return o.status !== "completed";
-  }
-
-  return o.status !== "completed" || !o.deliveredByName;
-})();
-
-    if (shouldAlwaysShow) return true;
+    if (shouldAlwaysShow(o)) return true;
 
     const t = safeFilterTime(o);
-    return t >= threeDaysAgo;
+    return t >= today;
   });
 }
 
 // BẤM "HÔM NAY": chỉ đúng hôm nay
 if (filter === "today") {
   timeFiltered = orders.filter((o) => {
-    const isCompletedButNotDelivered =
-      o.status === "completed" && !o.deliveredByName;
-
-    const shouldAlwaysShow = (() => {
-  const isSystem = o.type === "system_task" || o.type === "system_message";
-
-  if (isSystem) {
-    return o.status !== "completed";
-  }
-
-  return o.status !== "completed" || !o.deliveredByName;
-})();
-
-    if (shouldAlwaysShow) return true;
+    if (shouldAlwaysShow(o)) return true;
 
     const t = safeFilterTime(o);
     return t >= today;
@@ -360,6 +463,7 @@ if (filter === "today") {
 
 if (filter === "yesterday") {
   timeFiltered = orders.filter((o) => {
+    if (shouldAlwaysShow(o)) return true;
     const t = safeFilterTime(o);
     return t >= yesterday && t < today;
   });
@@ -367,6 +471,7 @@ if (filter === "yesterday") {
 
 if (filter === "7days") {
   timeFiltered = orders.filter((o) => {
+    if (shouldAlwaysShow(o)) return true;
     const t = safeFilterTime(o);
     return t >= sevenDaysAgo;
   });
@@ -379,6 +484,7 @@ if (filter && typeof filter === "object" && filter.type === "custom") {
   toDate.setHours(23, 59, 59, 999);
 
   timeFiltered = orders.filter((o) => {
+    if (shouldAlwaysShow(o)) return true;
     const t = safeFilterTime(o);
     return t >= fromDate && t <= toDate;
   });
@@ -430,6 +536,9 @@ const updateOrder = async (id, action) => {
       done_by_name: "",
       delivered_by_name: "",
       completed_by_name: "",
+      done_at: null,
+      delivered_at: null,
+      completed_at: null,
       updated_at: now,
     };
   }
@@ -438,6 +547,7 @@ const updateOrder = async (id, action) => {
     updateData = {
       status: "done",
       done_by_name: actorName,
+      done_at: now,
       updated_at: now,
     };
   }
@@ -446,6 +556,7 @@ const updateOrder = async (id, action) => {
     updateData = {
       status: current.status === "completed" ? "completed" : "delivered",
       delivered_by_name: actorName,
+      delivered_at: now,
       updated_at: now,
     };
   }
@@ -454,6 +565,7 @@ const updateOrder = async (id, action) => {
     updateData = {
       status: "completed",
       completed_by_name: actorName,
+      completed_at: now,
       updated_at: now,
     };
   }
@@ -484,6 +596,7 @@ const updateOrder = async (id, action) => {
     if (allUnderstood) {
       updateData.status = "done";
       updateData.done_by_name = actorName;
+      updateData.done_at = now;
     }
   }
 
@@ -571,6 +684,12 @@ const updateOrder = async (id, action) => {
             <div style={S.systemHeader}>🛠 NHIỆM VỤ HỆ THỐNG</div>
           )}
 
+          {o.customer_name && (
+            <div style={{ color: "#f1c75b", fontWeight: 800, fontSize: 15 }}>
+              👤 {o.customer_name}
+            </div>
+          )}
+
           <div
             ref={textRef}
             style={{
@@ -656,7 +775,13 @@ const showInCompleted = (o) => {
 };
 
 const getMetaText = (o, section) => {
-  const actionTime = o.lastActionAt || o.updated_at || o.createdAt || o.created_at;
+  const actionTime = section === "done"
+    ? (o.doneAt || o.lastActionAt)
+    : section === "delivered"
+    ? (o.deliveredAt || o.lastActionAt)
+    : section === "completed"
+    ? (o.completedAt || o.lastActionAt)
+    : (o.createdAt || o.lastActionAt);
 
   if (section === "new") {
     return `${formatTime(actionTime)} • ${o.createdByName || "Không rõ"}`;
@@ -673,6 +798,50 @@ const getMetaText = (o, section) => {
   return formatTime(actionTime);
 };
 
+const createQuickOrder = async () => {
+  const title = quickText.trim();
+  if (!title || quickSubmitting || !hasPermission(PERMISSIONS.CREATE_ORDER)) return;
+  setQuickSubmitting(true);
+  const me = getCurrentUser() || {};
+  const { data, error } = await supabase.from("orders").insert({
+    type: "normal",
+    title,
+    content: "",
+    status: "new",
+    pinned: false,
+    created_by: me.id || null,
+    created_by_name: me.name || me.username || "Không rõ",
+    has_image: false,
+    understood_by: [],
+    required_users: [],
+  }).select().single();
+  setQuickSubmitting(false);
+  if (error || !data) {
+    alert("Chưa tạo được đơn. Vui lòng thử lại.");
+    return;
+  }
+  setQuickText("");
+  await putLocal("orders", data);
+  await publishSyncEvent({ entityType: "order", entityId: data.id, payload: data });
+  setOrders((current) => [normalizeOrder(data), ...current.filter((item) => item.id !== data.id)]);
+  setStatusTab("new");
+  void notifyNewOrder({ id: data.id, title, content: "" });
+};
+
+const statusTabs = [
+  { key: "new", label: "Đơn mới", count: sorted.filter((o) => o.status === "new").length },
+  { key: "done", label: "Đã xong", count: sorted.filter(showInDone).length },
+  { key: "delivered", label: "Đã giao", count: sorted.filter(showInDelivered).length },
+  { key: "completed", label: "Hoàn thành", count: sorted.filter(showInCompleted).length },
+];
+
+const visibleOrders = sorted.filter((o) => {
+  if (statusTab === "new") return o.status === "new";
+  if (statusTab === "done") return showInDone(o);
+  if (statusTab === "delivered") return showInDelivered(o);
+  return showInCompleted(o);
+});
+
   return (
     <div style={S.app}>
 <style>
@@ -688,144 +857,107 @@ const getMetaText = (o, section) => {
       <SearchBar value={q} onChange={setQ} />
       <FilterBar value={filter} onChange={setFilter} />
 
-<div
-  onClick={() => navigate("/chat")}
-  style={{
-    margin: "10px 0 16px",
-    padding: "10px 14px",
-    borderRadius: 12,
-    background: groupUnreadCount > 0 ? "#7a1f1f" : "#1f1f1f",
-    border: "1px solid #444",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    cursor: "pointer",
-    animation: groupUnreadCount > 0 ? "pulseBadge 1s infinite" : "none",
-  }}
->
-  <div style={{ fontWeight: 700 }}>💬 Chat nhóm</div>
-  <div
-    style={{
-      minWidth: 28,
-      height: 28,
-      borderRadius: 999,
-      background: groupUnreadCount > 0 ? "#ff3b30" : "#333",
-      color: "#fff",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      fontWeight: 700,
-      padding: "0 8px",
-    }}
-  >
-    {groupUnreadCount}
-  </div>
-</div>
+      <div style={S.section}>{statusTabs.find((tab) => tab.key === statusTab)?.label}</div>
+      {visibleOrders.map((o) => (
+        <Card key={o.id} o={o} metaText={getMetaText(o, statusTab)}>
+          <>
+            {statusTab === "new" && o.type === "system_message" && (
+              <>
+                {hasPermission(PERMISSIONS.MARK_DONE) && o.created_by !== getCurrentUser()?.id && (
+                  <Btn onClick={() => updateOrder(o.id, "ack")}>👁 Đã hiểu</Btn>
+                )}
+                {o.requiredUsers?.length > 0 && (
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                    Chưa hiểu: {o.requiredUsers
+                      .filter((u) => u !== o.created_by && !(o.understoodBy || []).includes(u))
+                      .map(getUserName)
+                      .join(", ") || "Không còn ai"}
+                  </div>
+                )}
+              </>
+            )}
 
-      {/* 🔴 ĐƠN MỚI */}
-      <div style={S.section}>Đơn mới</div>
-      {sorted
-  .filter((o) => o.status === "new")
-  .map((o) => (
-    <Card key={o.id} o={o} metaText={getMetaText(o, "new")}>
-            <>
-              {o.type === "system_message" && (
-                <>
-                  {hasPermission(PERMISSIONS.MARK_DONE) && (
-                    <Btn onClick={() => updateOrder(o.id, "ack")}>👁 Đã hiểu</Btn>
-                  )}
+            {statusTab === "new" && o.type === "system_task" && (
+              <Btn onClick={() => updateOrder(o.id, "done")}>✓ Đã xong</Btn>
+            )}
 
-                  {o.requiredUsers?.length > 0 && (
-  <div style={{ fontSize: 12, opacity: 0.8 }}>
-    Chưa hiểu:{" "}
-    {o.requiredUsers
-  .filter((u) => !(o.understoodBy || []).includes(u))
-  .map(getUserName)
-  .join(", ")}
-  </div>
-)}
-                </>
-              )}
+            {statusTab === "new" && isNormal(o) && (
+              <>
+                {hasPermission(PERMISSIONS.EDIT_ORDER) && (
+                  <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
+                    📌 {o.pinned ? "Ưu tiên" : "Ghim"}
+                  </Btn>
+                )}
+                {hasPermission(PERMISSIONS.MARK_DONE) && (
+                  <Btn onClick={() => updateOrder(o.id, "done")}>✔ Đã xong</Btn>
+                )}
+              </>
+            )}
 
-              {o.type === "system_task" && (
-                <Btn onClick={() => updateOrder(o.id, "done")}>✓ Đã xong</Btn>
-              )}
+            {statusTab === "done" && isNormal(o) && (
+              <>
+                {hasPermission(PERMISSIONS.MARK_DELIVERED) && (
+                  <Btn onClick={() => updateOrder(o.id, "shipped")}>🚚 Giao</Btn>
+                )}
+                {hasPermission(PERMISSIONS.COMPLETE_ORDER) && o.status !== "completed" && (
+                  <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
+                )}
+              </>
+            )}
 
-              {isNormal(o) && (
-                <>
-                  {hasPermission(PERMISSIONS.EDIT_ORDER) && (
-                    <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
-                      📌 Ghim
-                    </Btn>
-                  )}
+            {statusTab === "done" && isSystem(o) && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+              <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
+            )}
 
-                  {hasPermission(PERMISSIONS.MARK_DONE) && (
-                    <Btn onClick={() => updateOrder(o.id, "done")}>✔ Đã xong</Btn>
-                  )}
-                </>
-              )}
-            </>
-          </Card>
-        ))}
+            {statusTab === "delivered" && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+              <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
+            )}
 
-      {/* 🟠 ĐÃ XONG */}
-      <div style={S.section}>Đã xong</div>
-      {sorted
-  .filter((o) => showInDone(o))
-  .map((o) => (
-    <Card key={o.id} o={o} metaText={getMetaText(o, "done")}>
-            <>
-              {isNormal(o) && (
-                <>
-                  {hasPermission(PERMISSIONS.MARK_DELIVERED) && (
-                    <Btn onClick={() => updateOrder(o.id, "shipped")}>🚚 Giao</Btn>
-                  )}
-
-                  {hasPermission(PERMISSIONS.COMPLETE_ORDER) && o.status !== "completed" && (
-  <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
-)}
-                </>
-              )}
-
-              {hasPermission(PERMISSIONS.EDIT_ORDER) && (
+            {(statusTab === "done" || statusTab === "delivered") &&
+              !(o.status === "completed" && o.deliveredByName) &&
+              hasPermission(PERMISSIONS.EDIT_ORDER) && (
                 <Btn onClick={() => updateOrder(o.id, "reset")}>↩ Đưa lên</Btn>
               )}
-
-              {isSystem(o) && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
-                <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
-              )}
-            </>
-          </Card>
-        ))}
-
-      {/* 🟢 ĐÃ GIAO */}
-      <div style={S.section}>Đã giao</div>
-      {sorted
-  .filter((o) => showInDelivered(o))
-  .map((o) => (
-    <Card key={o.id} o={o} metaText={getMetaText(o, "delivered")}>
-            <>
-              {hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
-                <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
-              )}
-              {hasPermission(PERMISSIONS.EDIT_ORDER) && (
-                <Btn onClick={() => updateOrder(o.id, "reset")}>↩ Đưa lên</Btn>
-              )}
-            </>
-          </Card>
-        ))}
-
-      {/* ⚫ HOÀN THÀNH */}
-      <div style={S.section}>Hoàn thành</div>
-      {sorted.filter((o) => showInCompleted(o)).map((o) => (
-  <Card key={o.id} o={o} metaText={getMetaText(o, "completed")}>
-          {hasPermission(PERMISSIONS.EDIT_ORDER) && (
-            <Btn onClick={() => updateOrder(o.id, "reset")}>↩ Đưa lên</Btn>
-          )}
+          </>
         </Card>
       ))}
 
-      <BottomNav active="home" />
+      {visibleOrders.length === 0 && (
+        <div style={{ color: "#888", textAlign: "center", padding: "36px 12px" }}>Chưa có đơn trong mục này.</div>
+      )}
+
+      {hasPermission(PERMISSIONS.CREATE_ORDER) && (
+        <form style={S.quickBar} onSubmit={(event) => { event.preventDefault(); createQuickOrder(); }}>
+          <input
+            style={S.quickInput}
+            value={quickText}
+            onChange={(event) => setQuickText(event.target.value)}
+            placeholder="Nhập nhanh một đơn mới..."
+          />
+          <button type="submit" style={S.quickButton} disabled={quickSubmitting || !quickText.trim()}>
+            {quickSubmitting ? "..." : "Tạo"}
+          </button>
+        </form>
+      )}
+
+      <div style={S.statusBar}>
+        {statusTabs.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => {
+              setStatusTab(tab.key);
+              window.scrollTo({ top: 0, behavior: "auto" });
+            }}
+            style={S.statusTab(statusTab === tab.key)}
+          >
+            <span>{tab.label}</span>
+            {tab.count > 0 && <b style={S.statusCount}>{tab.count > 99 ? "99+" : tab.count}</b>}
+          </button>
+        ))}
+      </div>
+
+      <BottomNav active="home" chatBadge={groupUnreadCount} />
     </div>
   );
 }

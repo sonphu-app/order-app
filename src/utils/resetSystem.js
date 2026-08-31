@@ -1,23 +1,48 @@
 import { supabase } from "../supabaseClient";
+import { clearLocalData } from "./localSync";
+
+async function deleteAllRows(table) {
+  const { error } = await supabase.from(table).delete().not("id", "is", null);
+  if (error) throw new Error(`${table}: ${error.message}`);
+}
+
+async function clearStorageBucket() {
+  let offset = 0;
+  const paths = [];
+  while (true) {
+    const { data, error } = await supabase.storage
+      .from("order-images")
+      .list("", { limit: 100, offset, sortBy: { column: "name", order: "asc" } });
+    if (error) throw new Error(`Storage: ${error.message}`);
+    paths.push(...(data || []).filter((item) => item.id).map((item) => item.name));
+    if ((data || []).length < 100) break;
+    offset += 100;
+  }
+  for (let index = 0; index < paths.length; index += 100) {
+    const { error } = await supabase.storage.from("order-images").remove(paths.slice(index, index + 100));
+    if (error) throw new Error(`Storage: ${error.message}`);
+  }
+}
 
 export async function resetAllData() {
   try {
-    // Xóa dữ liệu chính
-    await supabase.from("order_message_images").delete().neq("id", 0);
-    await supabase.from("order_messages").delete().neq("id", 0);
-    await supabase.from("group_message_images").delete().neq("id", 0);
-    await supabase.from("group_messages").delete().neq("id", 0);
-    await supabase.from("orders").delete().neq("id", 0);
-
-    // Nếu bạn muốn reset luôn user nhân viên thì mở dòng dưới:
-    // await supabase.from("users").delete().neq("id", "");
-
-    // Xóa session local hiện tại nếu app bạn còn lưu
-    localStorage.removeItem("currentUser");
-
+    for (const table of [
+      "order_message_images",
+      "order_messages",
+      "group_message_images",
+      "group_messages",
+      "order_images",
+      "order_edit_history",
+      "orders",
+    ]) {
+      await deleteAllRows(table);
+    }
+    await clearStorageBucket();
+    await clearLocalData();
+    alert("Đã xóa dữ liệu đơn hàng, chat và ảnh. Tài khoản nhân viên vẫn được giữ lại.");
     window.location.reload();
   } catch (err) {
     console.error("resetAllData error:", err);
-    alert("Reset dữ liệu thất bại. Mở console kiểm tra lỗi.");
+    alert(`Reset dữ liệu thất bại: ${err.message}`);
   }
 }

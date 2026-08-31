@@ -4,7 +4,7 @@ import React, { lazy, Suspense, useEffect, useRef, useState, useCallback } from 
 import { supabase } from "../supabaseClient";
 import "../styles/chat.css";
 import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
-import { cacheImage, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
+import { cacheImage, deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
 import { createImagePreviewBlob } from "../utils/imagePreview";
 import { useNavigate } from "react-router-dom";
 
@@ -27,6 +27,7 @@ export default function Chat() {
   const bottomRef = useRef(null);
   const msgListRef = useRef(null);
   const reloadTimerRef = useRef(null);
+  const viewerTouchRef = useRef(null);
   const navigate = useNavigate();
 
   const me = getCurrentUser();
@@ -144,27 +145,59 @@ export default function Chat() {
 
   // ===== REALTIME =====
   useEffect(() => {
-    const refresh = (includeUnread = false) => {
+    const refreshImagesFromLocal = () => {
       clearTimeout(reloadTimerRef.current);
-      reloadTimerRef.current = setTimeout(async () => {
-        await loadChat();
-        if (includeUnread) await loadUnread();
-        scrollToBottom(true);
-      }, 120);
+      reloadTimerRef.current = setTimeout(() => loadChat({ remote: false }), 40);
     };
     const channel = supabase
       .channel("group-chat")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "group_messages" },
-        () => refresh(true)
+        async (payload) => {
+          if (payload.eventType === "DELETE") {
+            await deleteLocal("groupMessages", payload.old.id);
+            setMessages((current) => current.filter((message) => message.id !== payload.old.id));
+          } else {
+            await putLocal("groupMessages", payload.new);
+            setMessages((current) => {
+              const optimistic = current.find((message) =>
+                String(message.id).startsWith("local-") &&
+                message.sender_id === payload.new.sender_id &&
+                message.text === payload.new.text
+              );
+              if (payload.eventType === "INSERT" && optimistic) return current;
+              const existing = current.find((message) => String(message.id) === String(payload.new.id));
+              if (!existing) return [...current, { ...payload.new, images: [] }];
+              return current.map((message) => String(message.id) === String(payload.new.id)
+                ? { ...message, ...payload.new }
+                : message);
+            });
+          }
+          await loadUnread();
+          if (payload.eventType === "INSERT") scrollToBottom(true);
+        }
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "group_message_images" },
-        () => refresh(false)
+        async (payload) => {
+          if (payload.eventType === "DELETE") await deleteLocal("groupMessageImages", payload.old.id);
+          else {
+            const row = {
+              ...payload.new,
+              local_image_url: await cacheImage(payload.new.image_url),
+            };
+            await putLocal("groupMessageImages", row);
+          }
+          refreshImagesFromLocal();
+        }
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.log("GROUP CHAT REALTIME:", status);
+        }
+      });
 
     return () => {
       clearTimeout(reloadTimerRef.current);
@@ -319,10 +352,24 @@ export default function Chat() {
   }
 
   const handleKeyDown = async (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       await send();
     }
+  };
+
+  const addSelectedImages = async (files, openEditor = false) => {
+    const selected = Array.from(files || []);
+    if (!selected.length) return;
+    const urls = await Promise.all(selected.map((file) => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    })));
+    const firstNewIndex = attachments.length;
+    setAttachments((current) => [...current, ...urls]);
+    if (openEditor) setEditingIndex(firstNewIndex);
+    setTimeout(() => scrollToBottom(true), 50);
   };
 
   return (
@@ -377,7 +424,7 @@ export default function Chat() {
                 )}
 
                 <div className="msgSeen">
-                  {(m.seen_by || []).map(getName).join(", ") || "Chưa ai xem"}
+                  Đã xem: {(m.seen_by || []).map(getName).join(", ") || "Chưa ai"}
                 </div>
               </div>
             </div>
@@ -424,28 +471,29 @@ export default function Chat() {
         />
 
         <div className="composerRow">
-          <label className="attachButton" aria-label="Chọn ảnh">
-            ＋
+          <label className="attachButton" aria-label="Chụp ảnh" title="Chụp ảnh">
+            📷
+            <input
+              className="fileInput"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={(e) => addSelectedImages(e.target.files, true)}
+            />
+          </label>
+
+          <label className="attachButton addImageButton" aria-label="Thêm ảnh" title="Thêm ảnh">
+            🖼
             <input
               className="fileInput"
               type="file"
               multiple
               accept="image/*"
-              onChange={(e) => {
-              const files = Array.from(e.target.files || []);
-              files.forEach((f) => {
-                const reader = new FileReader();
-                reader.onload = () =>
-                  setAttachments((a) => [...a, reader.result]);
-                reader.readAsDataURL(f);
-              });
-
-              setTimeout(() => scrollToBottom(true), 100);
-              }}
+              onChange={(e) => addSelectedImages(e.target.files)}
             />
           </label>
 
-          <button className="sendButton" onClick={send} aria-label="Gửi tin nhắn">
+          <button type="button" className="sendButton" onClick={send} aria-label="Gửi tin nhắn">
             ➤
           </button>
         </div>
@@ -472,34 +520,27 @@ export default function Chat() {
             ×
           </button>
 
-          {viewer.images.length > 1 && viewer.index > 0 && (
-            <button
-              className="navBtn left"
-              onClick={() =>
-                setViewer((v) => ({ ...v, index: v.index - 1 }))
-              }
-            >
-              ‹
-            </button>
-          )}
-
           <img
             src={viewer.images[viewer.index]}
             className="viewerImg"
             alt=""
+            onTouchStart={(event) => {
+              viewerTouchRef.current = event.touches[0]?.clientX ?? null;
+            }}
+            onTouchEnd={(event) => {
+              const start = viewerTouchRef.current;
+              const end = event.changedTouches[0]?.clientX;
+              viewerTouchRef.current = null;
+              if (start == null || end == null || Math.abs(end - start) < 45) return;
+              setViewer((current) => ({
+                ...current,
+                index: end < start
+                  ? Math.min(current.images.length - 1, current.index + 1)
+                  : Math.max(0, current.index - 1),
+              }));
+            }}
           />
-
-          {viewer.images.length > 1 &&
-            viewer.index < viewer.images.length - 1 && (
-              <button
-                className="navBtn right"
-                onClick={() =>
-                  setViewer((v) => ({ ...v, index: v.index + 1 }))
-                }
-              >
-                ›
-              </button>
-            )}
+          {viewer.images.length > 1 && <div className="viewerCounter">{viewer.index + 1}/{viewer.images.length} • Vuốt để xem</div>}
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 import { notifyNewOrder } from "../utils/push";
 import { supabase } from "../supabaseClient";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useRef } from "react";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
 import { useState, useEffect } from "react";
@@ -23,8 +23,10 @@ const canSystemMessage = me?.role === "admin";
 
 const [submitting, setSubmitting] = useState(false); 
  const [text, setText] = useState("");
+const [customerName, setCustomerName] = useState("");
 const [images, setImages] = useState([]);
 const [editingIndex, setEditingIndex] = useState(null);
+const textRef = useRef(null);
   const [mode, setMode] = useState("normal");
 useEffect(() => {
   if (editingOrder) {
@@ -37,18 +39,21 @@ useEffect(() => {
     );
 
     setImages(editingOrder.images || []);
+    setCustomerName(editingOrder.customer_name || "");
   }
+  requestAnimationFrame(() => textRef.current?.focus());
 }, [editingOrder]);
  // normal | system_task | system_message
-const handleFiles = (e) => {
-  const files = Array.from(e.target.files);
-
-  files.forEach(file => {
+const handleFiles = (fileList, openEditor = false) => {
+  const files = Array.from(fileList || []);
+  const firstNewIndex = images.length;
+  Promise.all(files.map((file) => new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      setImages(prev => [...prev, ev.target.result]);
-    };
+    reader.onload = (ev) => resolve(ev.target.result);
     reader.readAsDataURL(file);
+  }))).then((newImages) => {
+    setImages((current) => [...current, ...newImages]);
+    if (openEditor && newImages.length > 0) setEditingIndex(firstNewIndex);
   });
 };
 async function uploadOneImage(fileBase64, fileName) {
@@ -77,22 +82,14 @@ async function replaceOrderImages(orderId, imageList) {
     .delete()
     .eq("order_id", orderId);
 
-  const rows = [];
-
-  for (let i = 0; i < imageList.length; i++) {
-    const uploaded = await uploadOneImage(
-      imageList[i],
-      `${orderId}_${Date.now()}_${i}.png`
-    );
-
-    if (uploaded) {
-      rows.push({
+  const uploadedImages = await Promise.all(imageList.map((image, i) =>
+    uploadOneImage(image, `${orderId}_${Date.now()}_${i}.png`)
+  ));
+  const rows = uploadedImages.flatMap((uploaded) => uploaded ? [{
         order_id: orderId,
         image_url: uploaded.url,
         storage_path: uploaded.storagePath,
-      });
-    }
-  }
+      }] : []);
 
   if (rows.length > 0) {
     const insertRows = rows.map((row) => ({
@@ -139,6 +136,7 @@ if (editingOrder) {
   .update({
     title: title.trim(),
     content: content.trim(),
+    customer_name: customerName.trim() || null,
     status: "new",
     has_image: images.length > 0,
     done_by_name: "",
@@ -146,7 +144,7 @@ if (editingOrder) {
     completed_by_name: "",
     required_users:
       editingOrder.type === "system_message"
-        ? (await supabase.from("users").select("id")).data?.map(u => u.id) || []
+        ? (await supabase.from("users").select("id")).data?.map(u => u.id).filter((userId) => userId !== me?.id) || []
         : [],
   })
   .eq("id", editingOrder.id);
@@ -160,6 +158,7 @@ const updatedOrder = {
   ...editingOrder,
   title: title.trim(),
   content: content.trim(),
+  customer_name: customerName.trim() || null,
   status: "new",
   has_image: images.length > 0,
   done_by_name: "",
@@ -179,6 +178,7 @@ const beforeData = {
 const afterData = {
   title: title.trim(),
   content: content.trim(),
+  customer_name: customerName.trim() || null,
   type: editingOrder.type || "normal",
   status: "new",
 };
@@ -212,15 +212,16 @@ const { data: orderData, error: orderError } = await supabase
   type,
   title: title.trim(),
   content: content.trim(),
+  customer_name: customerName.trim() || null,
   status: "new",
   pinned: type === "system_message",
   created_by: me?.id || null,
 created_by_name: me?.name || me?.username || "Không rõ",
   has_image: images.length > 0,
-  understood_by: [],
+  understood_by: me?.id ? [me.id] : [],
   required_users:
     type === "system_message"
-      ? (await supabase.from("users").select("id")).data?.map(u => u.id) || []
+      ? (await supabase.from("users").select("id")).data?.map(u => u.id).filter((userId) => userId !== me?.id) || []
       : [],
 })
   .select()
@@ -289,7 +290,15 @@ navigate("/");
         )}
       </div>
 
+      <input
+        style={S.customerInput}
+        placeholder="Tên khách hàng (không bắt buộc)"
+        value={customerName}
+        onChange={(e) => setCustomerName(e.target.value)}
+      />
+
       <textarea
+  ref={textRef}
   style={S.textarea}
   placeholder="Dòng đầu = tiêu đề, các dòng sau = nội dung"
   value={text}
@@ -297,13 +306,15 @@ navigate("/");
 />
 
 {/* ===== CHỌN ẢNH ===== */}
-<div style={{marginTop:20}}>
-  <input
-    type="file"
-    multiple
-    accept="image/*"
-    onChange={handleFiles}
-  />
+<div style={S.imageButtons}>
+  <label style={S.imageButton}>📷 Camera
+    <input hidden type="file" accept="image/*" capture="environment"
+      onChange={(e) => { handleFiles(e.target.files, true); e.target.value = ""; }} />
+  </label>
+  <label style={S.imageButton}>🖼 Thêm ảnh
+    <input hidden type="file" multiple accept="image/*"
+      onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
+  </label>
 </div>
 {/* ===== PREVIEW ẢNH ===== */}
 <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:10}}>
@@ -420,6 +431,30 @@ const S = {
     background: "#1a1a1a",
     color: "#fff",
     marginBottom: 20
+  },
+  customerInput: {
+    width: "100%",
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid #d0a646",
+    background: "#1a1a1a",
+    color: "#fff",
+    marginBottom: 10,
+    boxSizing: "border-box",
+  },
+  imageButtons: {
+    display: "flex",
+    gap: 10,
+    marginTop: 4,
+  },
+  imageButton: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 10,
+    background: "#2a2a2a",
+    border: "1px solid #444",
+    textAlign: "center",
+    cursor: "pointer",
   },
   actions: {
     display: "flex",

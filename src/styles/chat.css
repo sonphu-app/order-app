@@ -39,11 +39,9 @@ body {
 .previewRemove { top: -6px; right: -6px; width: 21px; height: 21px; border-radius: 50%; background: #e53935; }
 .viewer { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.96); }
 .viewerImg { max-width: 95vw; max-height: 90dvh; object-fit: contain; }
-.viewerClose, .navBtn { position: absolute; z-index: 10000; border: 0; color: #fff; background: rgba(0,0,0,.55); cursor: pointer; }
+.viewerClose { position: absolute; z-index: 10000; border: 0; color: #fff; background: rgba(0,0,0,.55); cursor: pointer; }
 .viewerClose { top: 14px; right: 14px; padding: 6px 11px; border-radius: 12px; font-size: 28px; }
-.navBtn { top: 50%; transform: translateY(-50%); padding: 7px 12px; border-radius: 10px; font-size: 32px; }
-.navBtn.left { left: 8px; }
-.navBtn.right { right: 8px; }
+.viewerCounter { position: absolute; left: 50%; bottom: max(18px,env(safe-area-inset-bottom)); transform: translateX(-50%); padding: 7px 11px; border-radius: 999px; background: rgba(0,0,0,.58); color: #fff; font-size: 12px; white-space: nowrap; }
 @media (min-width: 800px) {
   .chatPage .composer, .chatPage .previewRow { left: 50%; right: auto; width: min(760px,100%); transform: translateX(-50%); }
   .msgList { width: min(760px,100%); box-sizing: border-box; margin: 0 auto; }

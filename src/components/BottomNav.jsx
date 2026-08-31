@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import { hasPermission, PERMISSIONS } from "../utils/permissions";
 
 export default function BottomNav({
   active = "home",
@@ -22,24 +23,33 @@ export default function BottomNav({
 
       {/* nhóm 4 nút */}
       <div style={s.mainGroup}>
-        <Item icon="⚖️" text="Cân xe" />
+        {hasPermission(PERMISSIONS.WEIGHING) && (
+          <Item icon="⚖️" text="Cân xe" active={active === "scale"} />
+        )}
 
-        <Item
-          icon="💬"
-          text="Chat nhóm"
-          badge={chatBadge}
-          onClick={() => navigate("/chat")}
-        />
+        {hasPermission(PERMISSIONS.CHAT) && (
+          <Item
+            icon="💬"
+            text="Chat nhóm"
+            badge={chatBadge}
+            active={active === "chat"}
+            onClick={() => navigate("/chat")}
+          />
+        )}
 
-        <Item
-          icon="➕"
-          text="Tạo đơn"
-          onClick={() => navigate("/create")}
-        />
+        {hasPermission(PERMISSIONS.CREATE_ORDER) && (
+          <Item
+            icon="➕"
+            text="Tạo đơn"
+            active={active === "create"}
+            onClick={() => navigate("/create")}
+          />
+        )}
 
         <Item
           icon="👤"
           text="Tài khoản"
+          active={active === "account"}
           onClick={() => navigate("/account")}
         />
       </div>
@@ -64,9 +74,9 @@ function formatBadge(n) {
   return n;
 }
 
-function Item({ icon, text, badge, onClick }) {
+function Item({ icon, text, badge, active, onClick }) {
   return (
-    <div style={s.item} onClick={onClick}>
+    <div style={{ ...s.item, ...(active ? s.itemActive : {}) }} onClick={onClick}>
       <div style={{ position: "relative" }}>
         <span style={{ fontSize: 22 }}>{icon}</span>
 
@@ -109,6 +119,8 @@ const s = {
     fontSize: 12,
     cursor: "pointer"
   },
+
+  itemActive: { color: "#fff" },
 
   text: { marginTop: 4 },
 

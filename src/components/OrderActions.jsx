@@ -12,9 +12,15 @@ export default function OrderActions({ order, onUpdated }) {
   const actorName = me?.name || me?.username || "Không rõ";
 
   async function updateStatus(updateData, goHome = true) {
+    const now = new Date().toISOString();
+    const timedUpdate = { ...updateData };
+    if (updateData.status === "done" && updateData.done_by_name) timedUpdate.done_at = now;
+    if (updateData.delivered_by_name) timedUpdate.delivered_at = now;
+    if (updateData.status === "completed" && updateData.completed_by_name) timedUpdate.completed_at = now;
+
     const { data, error } = await supabase
       .from("orders")
-      .update(updateData)
+      .update(timedUpdate)
       .eq("id", order.id)
       .select()
       .single();
@@ -64,6 +70,9 @@ export default function OrderActions({ order, onUpdated }) {
         done_by_name: "",
         delivered_by_name: "",
         completed_by_name: "",
+        done_at: null,
+        delivered_at: null,
+        completed_at: null,
         understood_by: [],
       },
       true
@@ -77,11 +86,11 @@ export default function OrderActions({ order, onUpdated }) {
       ? order.understoodBy
       : [];
 
-    const requiredUsers = Array.isArray(order.required_users)
+    const requiredUsers = (Array.isArray(order.required_users)
       ? order.required_users
       : Array.isArray(order.requiredUsers)
       ? order.requiredUsers
-      : [];
+      : []).filter((userId) => userId !== order.created_by);
 
     const nextUnderstood =
       actorId && !oldUnderstood.includes(actorId)
@@ -115,7 +124,7 @@ export default function OrderActions({ order, onUpdated }) {
         {/* ========== SYSTEM TASK ========== */}
         {isSystemTask && (
           <>
-            {order.status === "new" &&
+            {order.status === "new" && actorId !== order.created_by &&
               hasPermission(PERMISSIONS.MARK_DONE) && (
                 <button
                   style={S.btn}
@@ -272,7 +281,8 @@ export default function OrderActions({ order, onUpdated }) {
 
       {/* ===== BÊN PHẢI: HÀNH ĐỘNG ===== */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {hasPermission(PERMISSIONS.EDIT_ORDER) && (
+        {hasPermission(PERMISSIONS.EDIT_ORDER) &&
+          !(isNormal && order.status === "completed" && order.delivered_by_name) && (
           <button style={S.btn} onClick={handleReset}>
             Làm lại
           </button>

@@ -6,6 +6,7 @@ import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
 import OrderActions from "../components/OrderActions";
 import {
   cacheImage,
+  deleteLocal,
   getAllLocal,
   publishSyncEvent,
   putLocal,
@@ -24,9 +25,6 @@ const getName = (id) => {
 };
   const { id } = useParams();
   const navigate = useNavigate();
-const handleEdit = () => {
-  navigate("/create", { state: { editing: order } });
-};
   const me = getCurrentUser();
 
   const [order, setOrder] = useState(null);
@@ -35,7 +33,6 @@ const lastChatScrollRef = useRef(0);
 const ignoreAutoResizeUntilRef = useRef(0);
 const bodyRef = useRef(null);
 const inputRef = useRef(null);
-const reloadTimerRef = useRef(null);
 const [images, setImages] = useState([]);
 
   // CHAT
@@ -50,6 +47,7 @@ const [images, setImages] = useState([]);
 const [editIndex, setEditIndex] = useState(-1);
 // VIEWER cho ảnh trong CHAT
 const [chatViewer, setChatViewer] = useState(null); 
+const viewerTouchRef = useRef(null);
 // null | { imgs: string[], i: number }
 
 const handleChatScroll = (e) => {
@@ -134,40 +132,60 @@ useEffect(() => {
   loadOrder();
 }, [id]);
 useEffect(() => {
-  const scheduleRefresh = (kind) => {
-    clearTimeout(reloadTimerRef.current);
-    reloadTimerRef.current = setTimeout(() => {
-      if (kind === "order") loadOrder();
-      else loadChat();
-    }, 120);
-  };
-
   const channel = supabase
     .channel(`order-detail-${id}`)
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "orders", filter: `id=eq.${id}` },
-      () => scheduleRefresh("order")
+      (payload) => {
+        if (payload.eventType === "DELETE") {
+          deleteLocal("orders", payload.old.id);
+          navigate("/", { replace: true });
+          return;
+        }
+        putLocal("orders", payload.new);
+        setOrder((current) => ({ ...current, ...payload.new }));
+      }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "order_messages", filter: `order_id=eq.${id}` },
-      () => scheduleRefresh("chat")
+      (payload) => {
+        if (payload.eventType === "DELETE") {
+          deleteLocal("orderMessages", payload.old.id);
+          setMessages((current) => current.filter((item) => item.id !== payload.old.id));
+          return;
+        }
+        putLocal("orderMessages", payload.new);
+        setMessages((current) => {
+          const optimistic = current.find((item) =>
+            String(item.id).startsWith("local-") &&
+            item.sender_id === payload.new.sender_id &&
+            item.text === payload.new.text
+          );
+          if (payload.eventType === "INSERT" && optimistic) return current;
+          const existing = current.find((item) => item.id === payload.new.id);
+          if (existing) {
+            return current.map((item) => item.id === payload.new.id ? { ...item, ...payload.new } : item);
+          }
+          return [...current, { ...payload.new, images: [] }]
+            .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        });
+      }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "order_images", filter: `order_id=eq.${id}` },
-      () => scheduleRefresh("order")
+      () => loadOrder({ remote: false })
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "order_message_images" },
-      () => scheduleRefresh("chat")
+      () => loadChat({ remote: false })
     )
     .subscribe();
 
   return () => {
-    clearTimeout(reloadTimerRef.current);
     supabase.removeChannel(channel);
   };
 }, [id]);
@@ -411,7 +429,7 @@ void notifyOrderChat({
 }
 
   function handleKey(e) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       sendMessage();
     }
@@ -478,24 +496,18 @@ void notifyOrderChat({
     await loadChat();
   }
 
-  /* ================= DELETE ================= */
-  async function handleDelete() {
-  if (!window.confirm("Xác nhận xoá đơn?")) return;
-
-  const { error } = await supabase
-    .from("orders")
-    .delete()
-    .eq("id", order.id);
-
-  if (error) {
-    console.log("DELETE ERROR:", error);
-    return;
+  function addSelectedImages(fileList, openEditor = false) {
+    const files = Array.from(fileList || []);
+    const firstNewIndex = images.length;
+    Promise.all(files.map((file) => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    }))).then((newImages) => {
+      setImages((current) => [...current, ...newImages]);
+      if (openEditor && newImages.length > 0) setEditIndex(firstNewIndex);
+    });
   }
-
-  await publishSyncEvent({ entityType: "order", entityId: order.id, operation: "delete" });
-
-  navigate("/");
-}
 
   /* ================= RENDER ================= */
   return (
@@ -516,6 +528,12 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
   order={order}
   onUpdated={(updated) => setOrder(updated)}
 />
+        <div style={S.sub}>
+          Tạo bởi: {order.created_by_name || "Không rõ"} • {new Date(order.created_at).toLocaleString()}
+          {order.done_by_name && <> | Đã xong: {order.done_by_name} • {new Date(order.done_at || order.updated_at).toLocaleString()}</>}
+          {order.delivered_by_name && <> | Đã giao: {order.delivered_by_name} • {new Date(order.delivered_at || order.updated_at).toLocaleString()}</>}
+          {order.completed_by_name && <> | Hoàn thành: {order.completed_by_name} • {new Date(order.completed_at || order.updated_at).toLocaleString()}</>}
+        </div>
       </div>
 
       {/* ===== BODY ===== */}
@@ -538,6 +556,12 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
   <div style={S.orderTitleInside}>
     {order.title}
   </div>
+
+  {order.customer_name && (
+    <div style={{ color: "#f1c75b", fontWeight: 800, marginTop: 5 }}>
+      👤 {order.customer_name}
+    </div>
+  )}
 
   <div style={{ marginTop: 6, ...(orderCollapsed ? S.orderContentCollapsed : {}) }}>
   {order.content}
@@ -655,23 +679,16 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     </div>
   )}
 
-  {/* CHOOSE */}
+  {/* CAMERA / THÊM ẢNH */}
   <div style={S.chooseRow}>
-    <input
-      type="file"
-      multiple
-      accept="image/*"
-      onChange={(e) => {
-        const files = Array.from(e.target.files);
-        files.forEach(file => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            setImages(prev => [...prev, reader.result]);
-          };
-          reader.readAsDataURL(file);
-        });
-      }}
-    />
+    <label style={S.attachBtn}>📷 Camera
+      <input hidden type="file" accept="image/*" capture="environment"
+        onChange={(e) => { addSelectedImages(e.target.files, true); e.target.value = ""; }} />
+    </label>
+    <label style={S.attachBtn}>🖼 Thêm ảnh
+      <input hidden type="file" multiple accept="image/*"
+        onChange={(e) => { addSelectedImages(e.target.files); e.target.value = ""; }} />
+    </label>
   </div>
 
   {/* TEXTAREA + BUTTON */}
@@ -690,7 +707,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     />
 
     <div style={S.inputBtns}>
-      <button style={S.sendBtn} onClick={sendMessage}>
+      <button type="button" style={S.sendBtn} onClick={sendMessage}>
   ➤
 </button>
       <button
@@ -741,25 +758,21 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         src={order.images[viewerIndex]}
         alt=""
         style={S.viewerImg}
+        onTouchStart={(event) => {
+          viewerTouchRef.current = event.touches[0]?.clientX ?? null;
+        }}
+        onTouchEnd={(event) => {
+          const start = viewerTouchRef.current;
+          const end = event.changedTouches[0]?.clientX;
+          viewerTouchRef.current = null;
+          if (start == null || end == null || Math.abs(end - start) < 45) return;
+          setViewerIndex((current) => Math.max(
+            0,
+            Math.min(order.images.length - 1, current + (end < start ? 1 : -1))
+          ));
+        }}
       />
-
-      {viewerIndex > 0 && (
-        <button
-          style={{ ...S.viewerNav, left: 20 }}
-          onClick={() => setViewerIndex(viewerIndex - 1)}
-        >
-          ◀
-        </button>
-      )}
-
-      {viewerIndex < order.images.length - 1 && (
-        <button
-          style={{ ...S.viewerNav, right: 20 }}
-          onClick={() => setViewerIndex(viewerIndex + 1)}
-        >
-          ▶
-        </button>
-      )}
+      <div style={S.viewerCounter}>{viewerIndex + 1}/{order.images.length} • Vuốt để xem</div>
     </div>
   </div>
 )}
@@ -815,31 +828,21 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         src={chatViewer.imgs[chatViewer.i]}
         alt=""
         style={S.viewerImg}
+        onTouchStart={(event) => {
+          viewerTouchRef.current = event.touches[0]?.clientX ?? null;
+        }}
+        onTouchEnd={(event) => {
+          const start = viewerTouchRef.current;
+          const end = event.changedTouches[0]?.clientX;
+          viewerTouchRef.current = null;
+          if (start == null || end == null || Math.abs(end - start) < 45) return;
+          setChatViewer((current) => ({
+            ...current,
+            i: Math.max(0, Math.min(current.imgs.length - 1, current.i + (end < start ? 1 : -1))),
+          }));
+        }}
       />
-
-      {/* Nút lùi */}
-      {chatViewer.i > 0 && (
-        <button
-          style={{ ...S.viewerNav, left: 20 }}
-          onClick={() =>
-            setChatViewer(v => ({ ...v, i: v.i - 1 }))
-          }
-        >
-          ◀
-        </button>
-      )}
-
-      {/* Nút tiến */}
-      {chatViewer.i < chatViewer.imgs.length - 1 && (
-        <button
-          style={{ ...S.viewerNav, right: 20 }}
-          onClick={() =>
-            setChatViewer(v => ({ ...v, i: v.i + 1 }))
-          }
-        >
-          ▶
-        </button>
-      )}
+      <div style={S.viewerCounter}>{chatViewer.i + 1}/{chatViewer.imgs.length} • Vuốt để xem</div>
     </div>
   </div>
 )}
@@ -1132,17 +1135,16 @@ btnActive: {
     cursor: "pointer"
   },
 
-  viewerNav: {
+  viewerCounter: {
     position: "absolute",
-    top: "50%",
-    transform: "translateY(-50%)",
-    background: "rgba(255,255,255,0.2)",
-    border: "none",
+    bottom: 24,
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "rgba(0,0,0,0.65)",
     color: "#fff",
-    fontSize: 22,
-    padding: "8px 12px",
-    borderRadius: 8,
-    cursor: "pointer"
+    fontSize: 13,
+    padding: "7px 10px",
+    borderRadius: 999,
   },
 previewRow: {
   display: "flex",
@@ -1175,7 +1177,20 @@ removeImg: {
 },
 
 chooseRow: {
-  marginBottom: 8
+  marginBottom: 8,
+  display: "flex",
+  gap: 8,
+},
+
+attachBtn: {
+  flex: 1,
+  padding: "9px 10px",
+  background: "#2b2b2b",
+  border: "1px solid #444",
+  borderRadius: 10,
+  textAlign: "center",
+  fontSize: 13,
+  cursor: "pointer",
 },
 
 inputMain: {

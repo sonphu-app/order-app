@@ -102,6 +102,38 @@ export default function ImageEditor({ src, onClose, onSave }) {
   const [tool, setTool] = useState("move");
   const [color, setColor] = useState(COLORS[0]);
   const [canUndo, setCanUndo] = useState(false);
+  const historyMarkerRef = useRef(`image-editor-${crypto.randomUUID()}`);
+  const pendingSaveRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  const onSaveRef = useRef(onSave);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    onSaveRef.current = onSave;
+  }, [onClose, onSave]);
+
+  useEffect(() => {
+    const marker = historyMarkerRef.current;
+    window.history.pushState({ ...window.history.state, imageEditorMarker: marker }, "");
+
+    const handleBack = () => {
+      const pendingImage = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (pendingImage) onSaveRef.current(pendingImage);
+      else onCloseRef.current();
+    };
+
+    window.addEventListener("popstate", handleBack);
+    return () => window.removeEventListener("popstate", handleBack);
+  }, []);
+
+  const closeEditor = () => {
+    if (window.history.state?.imageEditorMarker === historyMarkerRef.current) {
+      window.history.back();
+    } else {
+      onCloseRef.current();
+    }
+  };
 
   useEffect(() => {
     const width = Math.max(280, Math.min(window.innerWidth - 20, 820));
@@ -324,8 +356,13 @@ export default function ImageEditor({ src, onClose, onSave }) {
     canvas.getObjects().filter((item) => item.isCropBox).forEach((item) => canvas.remove(item));
     canvas.discardActiveObject();
     canvas.renderAll();
-    onSave(canvas.toDataURL({ format: "jpeg", quality: 0.95 }));
-    onClose();
+    const result = canvas.toDataURL({ format: "jpeg", quality: 0.95 });
+    if (window.history.state?.imageEditorMarker === historyMarkerRef.current) {
+      pendingSaveRef.current = result;
+      window.history.back();
+    } else {
+      onSaveRef.current(result);
+    }
   };
 
   return (
@@ -346,7 +383,7 @@ export default function ImageEditor({ src, onClose, onSave }) {
           </>
         ) : (
           <>
-            <button aria-label="Hủy" style={S.topIcon} onClick={onClose}>✕</button>
+            <button aria-label="Hủy" style={S.topIcon} onClick={closeEditor}>✕</button>
             <div style={S.mainTools}>
               <button aria-label="Cắt" style={S.topIcon} onClick={startCrop}>✂</button>
               <button aria-label="Vẽ" style={S.topIcon} onClick={() => chooseTool("draw")}>✎</button>

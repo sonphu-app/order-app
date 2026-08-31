@@ -656,7 +656,7 @@ alert("Đã xóa tài khoản.");
           <div style={{ marginTop: 12, padding: 12, borderRadius: 12, border: "1px solid #f2c2c2", background: "#fff5f5" }}>
             <div style={{ fontWeight: 900, color: "#b00" }}>XÓA TOÀN BỘ DỮ LIỆU</div>
             <div style={{ marginTop: 6, color: "#333" }}>
-              Hành động này <b>không thể hoàn tác</b>. Sẽ xóa: đơn hàng, tài khoản, chat, mọi dữ liệu trong localStorage.
+              Hành động này <b>không thể hoàn tác</b>. Sẽ xóa: đơn hàng, chat, ảnh và bộ nhớ app trên thiết bị. Tài khoản nhân viên vẫn được giữ.
             </div>
             <div style={{ marginTop: 8 }}>
               Để xác nhận, hãy gõ đúng: <b>XOA</b>
