@@ -1,5 +1,4 @@
 // CHỈ DÁN - KHÔNG SỬA LINH TINH
-import { notifyGroupChat } from "../utils/push";
 import React, { lazy, Suspense, useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "../supabaseClient";
 import "../styles/chat.css";
@@ -310,7 +309,6 @@ export default function Chat() {
     setText("");
     setAttachments([]);
     scrollToBottom(false);
-    requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
 
     const { data: msg } = await supabase
       .from("group_messages")
@@ -333,9 +331,9 @@ export default function Chat() {
       message.id === optimisticId ? { ...msg, images: sendingAttachments } : message
     )));
     await putLocal("groupMessages", msg);
-    await publishSyncEvent({ entityType: "group_message", entityId: msg.id, payload: msg });
+    void publishSyncEvent({ entityType: "group_message", entityId: msg.id, payload: msg });
 
-    await Promise.all(sendingAttachments.map(async (source, i) => {
+    void Promise.all(sendingAttachments.map(async (source, i) => {
       const blob = await (await fetch(source)).blob();
       const stamp = Date.now();
       const name = `group_${msg.id}_${i}_${stamp}.jpg`;
@@ -385,17 +383,7 @@ export default function Chat() {
           storagePaths: [name],
         });
       }
-    }));
-
-    void notifyGroupChat({
-      text: sendingText,
-      imageCount: sendingAttachments.length,
-    }).catch((error) => console.log("NOTIFY GROUP CHAT ERROR:", error));
-
-    setTimeout(() => {
-      scrollToBottom(true);
-      inputRef.current?.focus();
-    }, 50);
+    })).catch((error) => console.log("UPLOAD GROUP CHAT IMAGES ERROR:", error));
   }
 
   const handleKeyDown = async (e) => {
@@ -513,8 +501,8 @@ export default function Chat() {
           rows={1}
           placeholder="Nhập tin nhắn..."
           onChange={(e) => setText(e.target.value)}
-          onFocus={() => setTimeout(() => scrollToBottom(true), 100)}
-          onClick={() => setTimeout(() => scrollToBottom(true), 100)}
+          onFocus={() => setTimeout(() => scrollToBottom(false), 100)}
+          onClick={() => setTimeout(() => scrollToBottom(false), 100)}
           onKeyDown={handleKeyDown}
         />
 
@@ -541,7 +529,13 @@ export default function Chat() {
             />
           </label>
 
-          <button type="button" className="sendButton" onClick={send} aria-label="Gửi tin nhắn">
+          <button
+            type="button"
+            className="sendButton"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={send}
+            aria-label="Gửi tin nhắn"
+          >
             ➤
           </button>
         </div>

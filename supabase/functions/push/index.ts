@@ -35,6 +35,7 @@ Deno.serve(async (req) => {
       body: messageBody,
       url,
       orderId,
+      notificationId,
     } = body || {};
 
     if (!type || !actorId || !title) {
@@ -64,6 +65,7 @@ Deno.serve(async (req) => {
       url: url || "/",
       type: type || "general",
       orderId: orderId || null,
+      notificationId: notificationId || `${type}_${Date.now()}`,
     });
 
     const results: any[] = [];
@@ -78,7 +80,12 @@ Deno.serve(async (req) => {
               auth: sub.auth,
             },
           },
-          payload
+          payload,
+          {
+            TTL: 24 * 60 * 60,
+            urgency: "high",
+            topic: String(notificationId || type || "message").slice(0, 32),
+          }
         );
 
         results.push({ endpoint: sub.endpoint, ok: true });

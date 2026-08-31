@@ -44,6 +44,8 @@ function saveHomeView(next) {
   }
 }
 
+const defaultFilterForStatus = (status) => status === "completed" ? "today" : "all";
+
 // Thẻ dùng một màu trung tính; trạng thái đã được tách thành từng tab riêng.
 const getCardColor = () => "#202020";
 // 🔘 BUTTON
@@ -206,10 +208,10 @@ const location = useLocation();
   const savedView = useMemo(() => readHomeView(), []);
   const [orders, setOrders] = useState(() => homeMemory.orders);
   const [q, setQ] = useState(() => savedView.q || "");
-  const [filter, setFilter] = useState(() => savedView.filter ?? null);
   const [quickText, setQuickText] = useState("");
   const [quickSubmitting, setQuickSubmitting] = useState(false);
   const [statusTab, setStatusTab] = useState(() => savedView.statusTab || "new");
+  const [filter, setFilter] = useState(() => defaultFilterForStatus(savedView.statusTab || "new"));
 const [users, setUsers] = useState([]);
 const [orderUnreadMap, setOrderUnreadMap] = useState(() => homeMemory.orderUnreadMap);
 const [groupUnreadCount, setGroupUnreadCount] = useState(() => homeMemory.groupUnreadCount);
@@ -225,6 +227,10 @@ useEffect(() => {
 useEffect(() => {
   saveHomeView({ q, filter, statusTab, scrollY: window.scrollY });
 }, [q, filter, statusTab]);
+
+useEffect(() => {
+  setFilter(defaultFilterForStatus(statusTab));
+}, [statusTab]);
 
 useEffect(() => {
   if (restoredScrollRef.current || orders.length === 0) return;
@@ -508,31 +514,21 @@ sevenDaysAgo.setDate(today.getDate() - 7);
 
 let timeFiltered = orders;
 
-// thời gian để lọc: ưu tiên lần cập nhật cuối, fallback về ngày tạo
-const safeFilterTime = (o) =>
-  new Date(o.lastActionAt || o.updated_at || o.createdAt || o.created_at || 0);
-
-const shouldAlwaysShow = (o) => {
-  const system = o.type === "system_task" || o.type === "system_message";
-  if (system) return o.status !== "completed";
-  return o.status !== "completed" || !o.deliveredByName;
+// Mỗi mục lọc theo đúng thời điểm của trạng thái đó.
+const safeFilterTime = (o) => {
+  const value = statusTab === "new"
+    ? o.createdAt || o.created_at
+    : statusTab === "done"
+    ? o.doneAt || o.done_at || o.updated_at
+    : statusTab === "delivered"
+    ? o.deliveredAt || o.delivered_at || o.updated_at
+    : o.completedAt || o.completed_at || o.updated_at;
+  return new Date(value || 0);
 };
-
-// MỞ APP: đơn chưa hoàn tất luôn hiện; đơn hoàn tất mặc định chỉ hiện hôm nay.
-if (filter === null) {
-  timeFiltered = orders.filter((o) => {
-    if (shouldAlwaysShow(o)) return true;
-
-    const t = safeFilterTime(o);
-    return t >= today;
-  });
-}
 
 // BẤM "HÔM NAY": chỉ đúng hôm nay
 if (filter === "today") {
   timeFiltered = orders.filter((o) => {
-    if (shouldAlwaysShow(o)) return true;
-
     const t = safeFilterTime(o);
     return t >= today;
   });
@@ -540,7 +536,6 @@ if (filter === "today") {
 
 if (filter === "yesterday") {
   timeFiltered = orders.filter((o) => {
-    if (shouldAlwaysShow(o)) return true;
     const t = safeFilterTime(o);
     return t >= yesterday && t < today;
   });
@@ -548,7 +543,6 @@ if (filter === "yesterday") {
 
 if (filter === "7days") {
   timeFiltered = orders.filter((o) => {
-    if (shouldAlwaysShow(o)) return true;
     const t = safeFilterTime(o);
     return t >= sevenDaysAgo;
   });
@@ -561,7 +555,6 @@ if (filter && typeof filter === "object" && filter.type === "custom") {
   toDate.setHours(23, 59, 59, 999);
 
   timeFiltered = orders.filter((o) => {
-    if (shouldAlwaysShow(o)) return true;
     const t = safeFilterTime(o);
     return t >= fromDate && t <= toDate;
   });

@@ -1,4 +1,3 @@
-import { notifyOrderChat } from "../utils/push";
 import { supabase } from "../supabaseClient";
 import { useParams, useNavigate } from "react-router-dom";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
@@ -36,6 +35,7 @@ const ignoreAutoResizeUntilRef = useRef(0);
 const bodyRef = useRef(null);
 const inputRef = useRef(null);
 const realtimeReadyRef = useRef(false);
+const initialChatScrollRef = useRef(false);
 const [images, setImages] = useState([]);
 
   // CHAT
@@ -145,6 +145,94 @@ const loadOrder = async ({ remote = true } = {}) => {
     await loadOrder({ remote: false });
   });
 };
+
+const scrollToLatestOnce = (messageCount) => {
+  if (initialChatScrollRef.current) return;
+  initialChatScrollRef.current = true;
+  if (messageCount > 0) setOrderCollapsed(true);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (!bodyRef.current) return;
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+      lastChatScrollRef.current = bodyRef.current.scrollTop;
+    });
+  });
+};
+
+/* ================= LOAD CHAT ================= */
+async function loadChat({ remote = true } = {}) {
+  const localMessages = (await getAllLocal("orderMessages"))
+    .filter((message) => String(message.order_id) === String(id));
+  const localMessageImages = await getAllLocal("orderMessageImages");
+  if (localMessages.length > 0) {
+    const cachedMessages = localMessages.map((message) => ({
+      ...message,
+      images: localMessageImages
+        .filter((image) => String(image.message_id) === String(message.id))
+        .map((image) => image.local_image_url || image.image_url),
+    })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    setMessages(cachedMessages);
+    scrollToLatestOnce(cachedMessages.length);
+  }
+
+  if (!remote) return;
+
+  const { data: msgs, error: msgErr } = await supabase
+    .from("order_messages")
+    .select("*")
+    .eq("order_id", id)
+    .order("created_at", { ascending: true });
+
+  if (msgErr) {
+    console.log("LOAD MSG ERROR:", msgErr);
+    if (localMessages.length === 0) return;
+  }
+  await putManyLocal("orderMessages", msgs || []);
+
+  const msgIds = (msgs || []).map((m) => m.id);
+  let imgs = [];
+
+  if (msgIds.length > 0) {
+    const { data: imgRows, error: imgErr } = await supabase
+      .from("order_message_images")
+      .select("*")
+      .in("message_id", msgIds);
+
+    if (imgErr) {
+      console.log("LOAD IMG ERROR:", imgErr);
+    } else {
+      const cachedById = new Map(localMessageImages.map((row) => [String(row.id), row]));
+      imgs = (imgRows || []).map((row) => ({
+        ...row,
+        local_image_url: cachedById.get(String(row.id))?.local_image_url,
+      }));
+      await putManyLocal("orderMessageImages", imgs);
+
+      void Promise.all(imgs.map(async (row) => ({
+        ...row,
+        local_image_url: await cacheImage(row.image_url),
+      }))).then(async (cachedRows) => {
+        await putManyLocal("orderMessageImages", cachedRows);
+        await loadChat({ remote: false });
+      });
+    }
+  }
+
+  const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
+  (msgs || []).forEach((message) => messageMap.set(String(message.id), message));
+  const imageMap = new Map(localMessageImages.map((image) => [String(image.id), image]));
+  imgs.forEach((image) => imageMap.set(String(image.id), image));
+  const allImages = [...imageMap.values()];
+  const merged = [...messageMap.values()].map((m) => ({
+    ...m,
+    images: allImages
+      .filter((img) => String(img.message_id) === String(m.id))
+      .map((img) => img.local_image_url || img.image_url),
+  })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+  setMessages(merged);
+  scrollToLatestOnce(merged.length);
+}
 
 useEffect(() => {
   loadOrder();
@@ -283,85 +371,9 @@ useEffect(() => {
   return () => window.removeEventListener("keydown", onKey);
 }, [viewerIndex, chatViewer, order?.images?.length]);
 
-  /* ================= LOAD CHAT ================= */
-const loadChat = async ({ remote = true } = {}) => {
-  const localMessages = (await getAllLocal("orderMessages"))
-    .filter((message) => String(message.order_id) === String(id));
-  const localMessageImages = await getAllLocal("orderMessageImages");
-  if (localMessages.length > 0) {
-    setMessages(localMessages.map((message) => ({
-      ...message,
-      images: localMessageImages
-        .filter((image) => String(image.message_id) === String(message.id))
-        .map((image) => image.local_image_url || image.image_url),
-    })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
-  }
-
-  if (!remote) return;
-
-  const { data: msgs, error: msgErr } = await supabase
-    .from("order_messages")
-    .select("*")
-    .eq("order_id", id)
-    .order("created_at", { ascending: true });
-
-  if (msgErr) {
-    console.log("LOAD MSG ERROR:", msgErr);
-    if (localMessages.length === 0) return;
-  }
-  await putManyLocal("orderMessages", msgs || []);
-
-  const msgIds = (msgs || []).map((m) => m.id);
-
-  let imgs = [];
-
-  if (msgIds.length > 0) {
-    const { data: imgRows, error: imgErr } = await supabase
-      .from("order_message_images")
-      .select("*")
-      .in("message_id", msgIds);
-
-    if (imgErr) {
-      console.log("LOAD IMG ERROR:", imgErr);
-    } else {
-      const cachedById = new Map(localMessageImages.map((row) => [String(row.id), row]));
-      imgs = (imgRows || []).map((row) => ({
-        ...row,
-        local_image_url: cachedById.get(String(row.id))?.local_image_url,
-      }));
-      await putManyLocal("orderMessageImages", imgs);
-
-      void Promise.all(imgs.map(async (row) => ({
-        ...row,
-        local_image_url: await cacheImage(row.image_url),
-      }))).then(async (cachedRows) => {
-        await putManyLocal("orderMessageImages", cachedRows);
-        await loadChat({ remote: false });
-      });
-    }
-  }
-
-  const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
-  (msgs || []).forEach((message) => messageMap.set(String(message.id), message));
-  const imageMap = new Map(localMessageImages.map((image) => [String(image.id), image]));
-  imgs.forEach((image) => imageMap.set(String(image.id), image));
-  const allImages = [...imageMap.values()];
-  const merged = [...messageMap.values()].map((m) => ({
-    ...m,
-    images: allImages
-      .filter((img) => String(img.message_id) === String(m.id))
-      .map((img) => img.local_image_url || img.image_url),
-  })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-
-  setMessages(merged);
-};
-
 useEffect(() => {
+  initialChatScrollRef.current = false;
   loadChat();
-}, [id]);
-  /* ================= SCROLL TO TOP WHEN OPEN ORDER ================= */
-  useEffect(() => {
-  orderTopRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
 }, [id]);
 
   /* ================= MARK AS SEEN ================= */
@@ -413,8 +425,7 @@ useEffect(() => {
   setText("");
   setImages([]);
   requestAnimationFrame(() => {
-    inputRef.current?.focus({ preventScroll: true });
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   });
 
   try {
@@ -442,9 +453,9 @@ useEffect(() => {
       message.id === optimisticId ? { ...msgData, images: outgoingImages } : message
     )));
     await putLocal("orderMessages", msgData);
-    await publishSyncEvent({ entityType: "order_message", entityId: msgData.id, payload: msgData });
+    void publishSyncEvent({ entityType: "order_message", entityId: msgData.id, payload: msgData });
 
-    await Promise.all(outgoingImages.map(async (base64, i) => {
+    void Promise.all(outgoingImages.map(async (base64, i) => {
   const blob = await (await fetch(base64)).blob();
   const fileName = `${msgData.id}_${Date.now()}_${i}.jpg`;
   const previewName = `${msgData.id}_${Date.now()}_${i}_preview.jpg`;
@@ -505,19 +516,9 @@ useEffect(() => {
       storagePaths: [fileName],
     });
   }
-}));
-
-void notifyOrderChat({
-  order,
-  text: outgoingText,
-  imageCount: outgoingImages.length,
-}).catch((error) => console.log("NOTIFY ORDER CHAT ERROR:", error));
-
-    setTimeout(() => {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, 100);
-  } finally {
-    inputRef.current?.focus({ preventScroll: true });
+})).catch((error) => console.log("UPLOAD ORDER CHAT IMAGES ERROR:", error));
+  } catch (error) {
+    console.log("SEND ORDER MESSAGE ERROR:", error);
   }
 }
 
@@ -812,7 +813,12 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     />
 
     <div style={S.inputBtns}>
-      <button type="button" style={S.sendBtn} onClick={sendMessage}>
+      <button
+        type="button"
+        style={S.sendBtn}
+        onPointerDown={(event) => event.preventDefault()}
+        onClick={sendMessage}
+      >
   ➤
 </button>
     </div>
