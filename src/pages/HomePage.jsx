@@ -5,7 +5,6 @@ import { supabase } from "../supabaseClient";
 import { ensureWeeklySystemTask } from "../utils/systemTasks";
 import { useEffect, useMemo, useState, useRef } from "react";
 import Header from "../components/Header";
-import SearchBar from "../components/SearchBar";
 import FilterBar from "../components/FilterBar";
 import BottomNav from "../components/BottomNav";
 import { hasPermission, PERMISSIONS } from "../utils/permissions";
@@ -159,12 +158,12 @@ const S = {
     borderRadius: 10,
     background: active ? "#f1f1f1" : "transparent",
     color: active ? "#111" : "#bcbcbc",
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: 750,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: 4,
+    gap: 2,
     padding: "5px 3px",
     cursor: "pointer",
   }),
@@ -179,6 +178,19 @@ const S = {
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
+  },
+  unreadCount: {
+    minWidth: 18,
+    height: 18,
+    padding: "0 4px",
+    borderRadius: 999,
+    background: "#2589d8",
+    color: "white",
+    fontSize: 10,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    boxShadow: "0 0 0 2px rgba(37,137,216,.18)",
   },
 };
 
@@ -828,11 +840,19 @@ const createQuickOrder = async () => {
   void notifyNewOrder({ id: data.id, title, content: "" });
 };
 
+const unreadIn = (list) => list.reduce(
+  (total, orderItem) => total + (orderUnreadMap[orderItem.id] || 0),
+  0
+);
+const newOrders = sorted.filter((o) => o.status === "new");
+const doneOrders = sorted.filter(showInDone);
+const deliveredOrders = sorted.filter(showInDelivered);
+const completedOrders = sorted.filter(showInCompleted);
 const statusTabs = [
-  { key: "new", label: "Đơn mới", count: sorted.filter((o) => o.status === "new").length },
-  { key: "done", label: "Đã xong", count: sorted.filter(showInDone).length },
-  { key: "delivered", label: "Đã giao", count: sorted.filter(showInDelivered).length },
-  { key: "completed", label: "Hoàn thành", count: sorted.filter(showInCompleted).length },
+  { key: "new", label: "Đơn mới", count: newOrders.length, unread: unreadIn(newOrders) },
+  { key: "done", label: "Đã xong", count: doneOrders.length, unread: unreadIn(doneOrders) },
+  { key: "delivered", label: "Đã giao", count: deliveredOrders.length, unread: unreadIn(deliveredOrders) },
+  { key: "completed", label: "Hoàn thành", count: completedOrders.length, unread: unreadIn(completedOrders) },
 ];
 
 const visibleOrders = sorted.filter((o) => {
@@ -853,8 +873,7 @@ const visibleOrders = sorted.filter((o) => {
     }
   `}
 </style>
-      <Header />
-      <SearchBar value={q} onChange={setQ} />
+      <Header searchValue={q} onSearchChange={setQ} />
       <FilterBar value={filter} onChange={setFilter} />
 
       <div style={S.section}>{statusTabs.find((tab) => tab.key === statusTab)?.label}</div>
@@ -951,8 +970,13 @@ const visibleOrders = sorted.filter((o) => {
             }}
             style={S.statusTab(statusTab === tab.key)}
           >
+            {tab.unread > 0
+              ? <b style={S.unreadCount}>{tab.unread > 99 ? "99+" : tab.unread}</b>
+              : <span style={{ width: 18, flexShrink: 0 }} />}
             <span>{tab.label}</span>
-            {tab.count > 0 && <b style={S.statusCount}>{tab.count > 99 ? "99+" : tab.count}</b>}
+            {tab.count > 0
+              ? <b style={S.statusCount}>{tab.count > 99 ? "99+" : tab.count}</b>
+              : <span style={{ width: 18, flexShrink: 0 }} />}
           </button>
         ))}
       </div>
