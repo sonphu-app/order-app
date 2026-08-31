@@ -45,10 +45,8 @@ function saveHomeView(next) {
 }
 
 const defaultFilterForStatus = (status) => status === "completed" ? "today" : "all";
-const ORDERS_PAGE_SIZE = 25;
-
 // Thẻ dùng một màu trung tính; trạng thái đã được tách thành từng tab riêng.
-const getCardColor = () => "#202020";
+const getCardColor = () => "#fffaf0";
 // 🔘 BUTTON
 const Btn = ({ children, onClick, active }) => (
   <button
@@ -57,11 +55,11 @@ const Btn = ({ children, onClick, active }) => (
       if (onClick) onClick();
     }}
     style={{
-      background: active ? "#2ecc71" : "#2a2a2a",
-      border: "1px solid #444",
-      color: active ? "white" : "#f1f1f1",
-      fontSize: 13,
-      padding: "4px 8px",
+      background: active ? "#f2d58f" : "#fff3d6",
+      border: "1px solid #d1aa62",
+      color: "#4d3218",
+      fontSize: 15,
+      padding: "7px 11px",
       borderRadius: 20,
       cursor: "pointer",
       fontWeight: 600,
@@ -74,29 +72,29 @@ const Btn = ({ children, onClick, active }) => (
 // 🎨 STYLE
 const S = {
   cardContent: { display: "flex", flexDirection: "column", gap: 8 },
-  attachmentNote: { marginTop: 6, fontSize: 12, opacity: 0.9 },
+  attachmentNote: { marginTop: 6, fontSize: 17, color: "#5f4a32", fontWeight: 650 },
 
   app: {
     minHeight: "100dvh",
-    background: "#121212",
+    background: "#f5efe3",
     padding: 14,
     paddingBottom: 176,
-    color: "white",
+    color: "#3d2b1b",
   },
-  section: { fontSize: 26, fontWeight: 800, margin: "20px 0 10px" },
+  section: { fontSize: 28, fontWeight: 850, margin: "20px 0 12px", color: "#5b3716" },
   card: {
     borderRadius: 14,
     padding: 14,
     marginBottom: 16,
     maxWidth: "100%",
     overflow: "hidden",
-    border: "1px solid #3b3b3b",
-    boxShadow: "0 5px 12px rgba(0,0,0,.3)",
+    border: "1px solid #d8b36a",
+    boxShadow: "0 4px 14px rgba(91,55,22,.13)",
   },
   systemHeader: {
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: "bold",
-    color: "#ffcc00",
+    color: "#6f430d",
     marginBottom: 6,
     textTransform: "uppercase",
   },
@@ -106,7 +104,7 @@ const S = {
     gap: 6,
     minWidth: 0,
     lineHeight: 1.25,
-    color: "#ffcc00",
+    color: "#6f430d",
     marginBottom: 6,
     whiteSpace: "nowrap",
     overflow: "hidden",
@@ -119,7 +117,7 @@ const S = {
     borderRadius: 20,
     background: "#ffd166",
     color: "#171717",
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: 900,
     whiteSpace: "nowrap",
   },
@@ -131,7 +129,7 @@ const S = {
     borderRadius: 20,
     background: "#ffd166",
     color: "#171717",
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: 900,
     whiteSpace: "nowrap",
   },
@@ -139,30 +137,18 @@ const S = {
     minWidth: 0,
     overflow: "hidden",
     textOverflow: "ellipsis",
-    fontSize: 15,
+    fontSize: 20,
     fontWeight: 800,
-    color: "#ffcc00",
+    color: "#6f430d",
   },
   title: { fontSize: 22, fontWeight: 800 },
-  time: { fontSize: 14, color: "#ddd" },
+  time: { fontSize: 17, color: "#745b3d" },
   text: {
-    fontSize: 14,
-    lineHeight: 1.4,
+    fontSize: 21,
+    lineHeight: 1.6,
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
     overflowWrap: "anywhere",
-  },
-  loadMore: {
-    display: "block",
-    width: "100%",
-    margin: "2px 0 12px",
-    padding: "8px 12px",
-    border: "1px solid #3b3b3b",
-    borderRadius: 10,
-    background: "#1b1b1b",
-    color: "#bbb",
-    fontSize: 12,
-    cursor: "pointer",
   },
   statusBar: {
     position: "fixed",
@@ -173,8 +159,9 @@ const S = {
     height: 50,
     display: "grid",
     gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-    background: "#161616",
-    borderTop: "1px solid #343434",
+    background: "#fff7e6",
+    borderTop: "1px solid #d8b36a",
+    boxShadow: "0 -3px 12px rgba(91,55,22,.12)",
     padding: "4px 6px",
     gap: 4,
   },
@@ -188,8 +175,8 @@ const S = {
     display: "flex",
     gap: 8,
     alignItems: "center",
-    background: "#161616",
-    borderTop: "1px solid #343434",
+    background: "#fff7e6",
+    borderTop: "1px solid #d8b36a",
     padding: "5px 10px",
     boxSizing: "border-box",
   },
@@ -199,31 +186,32 @@ const S = {
     minHeight: 36,
     maxHeight: 140,
     borderRadius: 10,
-    border: "1px solid #444",
-    background: "#242424",
-    color: "#fff",
+    border: "1px solid #d1aa62",
+    background: "#fffaf0",
+    color: "#3d2b1b",
     padding: "8px 11px",
     resize: "none",
     overflowY: "auto",
-    lineHeight: 1.25,
+    lineHeight: 1.4,
+    fontSize: 17,
     fontFamily: "inherit",
   },
   quickButton: {
-    height: 36,
+    height: 40,
     border: 0,
     borderRadius: 10,
-    background: "#2ecc71",
-    color: "#111",
+    background: "#d3a13f",
+    color: "#3d260d",
     fontWeight: 800,
     padding: "0 14px",
   },
   statusTab: (active) => ({
     minWidth: 0,
-    border: active ? "1px solid #d9d9d9" : "1px solid transparent",
+    border: active ? "1px solid #a8731f" : "1px solid transparent",
     borderRadius: 10,
-    background: active ? "#f1f1f1" : "transparent",
-    color: active ? "#111" : "#bcbcbc",
-    fontSize: 12,
+    background: active ? "#f2d58f" : "transparent",
+    color: active ? "#5b3716" : "#745b3d",
+    fontSize: 14,
     fontWeight: 750,
     display: "flex",
     alignItems: "center",
@@ -239,7 +227,7 @@ const S = {
     borderRadius: 999,
     background: "#2589d8",
     color: "white",
-    fontSize: 9,
+    fontSize: 11,
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
@@ -251,7 +239,7 @@ const S = {
     borderRadius: 999,
     background: "#d83a3a",
     color: "white",
-    fontSize: 10,
+    fontSize: 12,
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
@@ -274,8 +262,6 @@ const [users, setUsers] = useState([]);
 const [orderUnreadMap, setOrderUnreadMap] = useState(() => homeMemory.orderUnreadMap);
 const [groupUnreadCount, setGroupUnreadCount] = useState(() => homeMemory.groupUnreadCount);
 const [focusOrderId, setFocusOrderId] = useState(() => location.state?.focusOrderId || null);
-const [visibleLimit, setVisibleLimit] = useState(ORDERS_PAGE_SIZE);
-const loadMoreRef = useRef(null);
 const restoredScrollRef = useRef(false);
 const handledNavigationRef = useRef(false);
   const realtimeReadyRef = useRef(false);
@@ -808,18 +794,7 @@ const updateOrder = async (id, action) => {
   setOrders((currentOrders) => currentOrders.map((item) => item.id === id ? normalizeOrder(nextOrder) : item));
   void publishSyncEvent({ entityType: "order", entityId: id, payload: nextOrder });
 
-  const nextTab = action === "reset"
-    ? "new"
-    : action === "done" || (action === "ack" && updateData.status === "done")
-    ? "done"
-    : action === "shipped" && updateData.status !== "completed"
-    ? "delivered"
-    : action === "completed" || updateData.status === "completed"
-    ? "completed"
-    : statusTab;
-  setQ("");
-  setStatusTab(nextTab);
-  setFocusOrderId(id);
+  // Giữ nguyên mục và bộ lọc hiện tại sau khi đổi trạng thái.
 };
 
   // sort ghim lên đầu
@@ -863,7 +838,7 @@ const updateOrder = async (id, action) => {
           ...S.card,
           background: getCardColor(o),
           ...(focusOrderId === o.id ? {
-            border: "2px solid #2ecc71",
+            border: "2px solid #c8952e",
             boxShadow: "0 0 0 3px rgba(46,204,113,.18), 0 6px 14px rgba(0,0,0,.35)",
           } : {}),
         }}
@@ -930,8 +905,8 @@ const updateOrder = async (id, action) => {
                 setExpanded(true);
               }}
               style={{
-                fontSize: 12,
-                color: "#4da6ff",
+                fontSize: 15,
+                color: "#1266b3",
                 marginTop: 6,
                 cursor: "pointer",
                 fontWeight: 600,
@@ -947,7 +922,7 @@ const updateOrder = async (id, action) => {
                 e.stopPropagation();
                 setExpanded(false);
               }}
-              style={{ fontSize: 12, color: "#aaa", marginTop: 6, cursor: "pointer" }}
+              style={{ fontSize: 16, color: "#745b3d", marginTop: 6, cursor: "pointer" }}
             >
               Thu gọn
             </div>
@@ -968,7 +943,7 @@ const updateOrder = async (id, action) => {
             flexWrap: "wrap",
           }}
         >
-          <div style={{ fontSize: 12, opacity: 0.7 }}>
+          <div style={{ fontSize: 16, color: "#745b3d" }}>
   {metaText || formatTime(o.lastActionAt || o.createdAt)}
 </div>
 
@@ -1021,10 +996,9 @@ const getMetaText = (o, section) => {
 };
 
 const createQuickOrder = async () => {
-  const lines = quickText.trim().split("\n");
-  const title = (lines.shift() || "").trim();
-  const content = lines.join("\n").trim();
-  if (!title || quickSubmitting || !hasPermission(PERMISSIONS.CREATE_ORDER)) return;
+  const content = quickText.trim();
+  const title = "";
+  if (!content || quickSubmitting || !hasPermission(PERMISSIONS.CREATE_ORDER)) return;
   setQuickSubmitting(true);
 const me = getCurrentUser() || {};
   const now = new Date().toISOString();
@@ -1078,26 +1052,6 @@ const visibleOrders = q.trim() ? sorted : sorted.filter((o) => {
   return showInCompleted(o);
 });
 
-const allVisibleOrders = visibleOrders;
-const pagedOrders = allVisibleOrders.slice(0, visibleLimit);
-
-useEffect(() => {
-  setVisibleLimit(ORDERS_PAGE_SIZE);
-}, [statusTab, filter, q]);
-
-useEffect(() => {
-  if (!loadMoreRef.current || pagedOrders.length >= allVisibleOrders.length) return undefined;
-  if (typeof IntersectionObserver === "undefined") return undefined;
-
-  const observer = new IntersectionObserver((entries) => {
-    if (entries[0]?.isIntersecting) {
-      setVisibleLimit((current) => Math.min(current + ORDERS_PAGE_SIZE, allVisibleOrders.length));
-    }
-  }, { rootMargin: "240px" });
-  observer.observe(loadMoreRef.current);
-  return () => observer.disconnect();
-}, [pagedOrders.length, allVisibleOrders.length]);
-
 useEffect(() => {
   if (!focusOrderId || !visibleOrders.some((item) => item.id === focusOrderId)) return;
   const timer = setTimeout(() => {
@@ -1132,7 +1086,7 @@ const sectionForOrder = (orderItem) => {
       <FilterBar value={filter} onChange={setFilter} />
 
       <div style={S.section}>{q.trim() ? "Kết quả tìm kiếm" : statusTabs.find((tab) => tab.key === statusTab)?.label}</div>
-      {pagedOrders.map((o) => {
+      {visibleOrders.map((o) => {
         const cardSection = q.trim() ? sectionForOrder(o) : statusTab;
         return (
         <Card key={o.id} o={o} metaText={getMetaText(o, cardSection)}>
@@ -1143,7 +1097,7 @@ const sectionForOrder = (orderItem) => {
                   <Btn onClick={() => updateOrder(o.id, "ack")}>👁 Đã hiểu</Btn>
                 )}
                 {o.requiredUsers?.length > 0 && (
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                  <div style={{ fontSize: 16, color: "#745b3d" }}>
                     Chưa hiểu: {o.requiredUsers
                       .filter((u) => u !== o.created_by && !(o.understoodBy || []).includes(u))
                       .map(getUserName)
@@ -1198,19 +1152,8 @@ const sectionForOrder = (orderItem) => {
         </Card>
       );})}
 
-      {pagedOrders.length < allVisibleOrders.length && (
-        <button
-          ref={loadMoreRef}
-          type="button"
-          style={S.loadMore}
-          onClick={() => setVisibleLimit((current) => Math.min(current + ORDERS_PAGE_SIZE, allVisibleOrders.length))}
-        >
-          Xem thêm đơn
-        </button>
-      )}
-
-      {pagedOrders.length === 0 && (
-        <div style={{ color: "#888", textAlign: "center", padding: "36px 12px" }}>Chưa có đơn trong mục này.</div>
+      {visibleOrders.length === 0 && (
+        <div style={{ color: "#745b3d", fontSize: 18, textAlign: "center", padding: "36px 12px" }}>Chưa có đơn trong mục này.</div>
       )}
 
       {hasPermission(PERMISSIONS.CREATE_ORDER) && (

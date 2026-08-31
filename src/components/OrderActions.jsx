@@ -11,7 +11,7 @@ export default function OrderActions({ order, onUpdated }) {
   const actorId = me?.id;
   const actorName = me?.name || me?.username || "Không rõ";
 
-  async function updateStatus(updateData, goHome = true) {
+  async function updateStatus(updateData) {
     const now = new Date().toISOString();
     const timedUpdate = { ...updateData };
     if (updateData.status === "done" && updateData.done_by_name) timedUpdate.done_at = now;
@@ -54,19 +54,18 @@ export default function OrderActions({ order, onUpdated }) {
     await putLocal("orders", data);
     void publishSyncEvent({ entityType: "order", entityId: order.id, payload: data });
 
-    if (goHome) {
-      const statusTab = data.status === "new"
-        ? "new"
-        : data.status === "done"
-        ? "done"
-        : data.status === "delivered"
-        ? "delivered"
-        : "completed";
-      navigate("/", {
-        replace: true,
-        state: { focusOrderId: order.id, statusTab },
-      });
-    }
+    const statusTab = data.status === "new"
+      ? "new"
+      : data.status === "done"
+      ? "done"
+      : data.status === "delivered"
+      ? "delivered"
+      : "completed";
+    navigate("/", {
+      replace: true,
+      state: { focusOrderId: order.id, statusTab },
+    });
+
   }
 
   function handleEdit() {
@@ -105,8 +104,7 @@ export default function OrderActions({ order, onUpdated }) {
         completed_at: null,
         needs_rework: true,
         understood_by: [],
-      },
-      true
+      }
     );
   }
 
@@ -142,7 +140,7 @@ export default function OrderActions({ order, onUpdated }) {
       updateData.needs_rework = false;
     }
 
-    await updateStatus(updateData, true);
+    await updateStatus(updateData);
   }
 
   const isNormal = !order.type || order.type === "normal";
@@ -349,13 +347,13 @@ const S = {
   },
 
   btn: {
-    background: "#2c2c2c",
-    color: "#e0e0e0",
-    border: "1px solid #3a3a3a",
+    background: "#fff3d6",
+    color: "#4d3218",
+    border: "1px solid #d1aa62",
     borderRadius: 6,
-    padding: "4px 8px",
-    fontSize: 12,
-    height: 28,
+    padding: "6px 10px",
+    fontSize: 14,
+    height: 34,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -368,9 +366,9 @@ const S = {
     color: "#fff",
     border: "1px solid #b91c1c",
     borderRadius: 6,
-    padding: "4px 8px",
-    fontSize: 12,
-    height: 28,
+    padding: "6px 10px",
+    fontSize: 14,
+    height: 34,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",

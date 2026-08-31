@@ -4,7 +4,6 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
 import OrderActions from "../components/OrderActions";
 import {
-  cacheImage,
   deleteLocal,
   getAllLocal,
   publishSyncEvent,
@@ -12,61 +11,9 @@ import {
   putManyLocal,
 } from "../utils/localSync";
 import { createImagePreviewBlob } from "../utils/imagePreview";
+import { getClipboardImageFiles } from "../utils/clipboardImages";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
-
-function getOrderImageStoragePath(row) {
-  if (row?.storage_path) return row.storage_path;
-  const marker = "/storage/v1/object/public/order-images/";
-  const url = String(row?.image_url || "");
-  const markerIndex = url.indexOf(marker);
-  if (markerIndex < 0) return null;
-  return decodeURIComponent(url.slice(markerIndex + marker.length).split("?")[0]);
-}
-
-function getOrderImageThumbnail(url) {
-  const source = String(url || "");
-  const marker = "/storage/v1/object/public/";
-  const markerIndex = source.indexOf(marker);
-  if (markerIndex < 0) return source;
-  const baseUrl = source.slice(0, markerIndex);
-  const storagePath = source.slice(markerIndex + marker.length).split("?")[0];
-  return `${baseUrl}/storage/v1/render/image/public/${storagePath}?width=360&height=360&resize=contain&quality=75`;
-}
-
-function DeferredCachedImage({ src, ...props }) {
-  const localSource = /^(blob:|data:)/i.test(String(src || ""));
-  const [resolvedSrc, setResolvedSrc] = useState(localSource ? src : "");
-  const imageRef = useRef(null);
-
-  useEffect(() => {
-    if (!src || localSource) return undefined;
-    let active = true;
-    let observer;
-    const reveal = () => {
-      void cacheImage(src).then((cachedSrc) => {
-        if (!active) return;
-        setResolvedSrc(cachedSrc || src);
-      });
-      observer?.disconnect();
-    };
-
-    if (typeof IntersectionObserver === "undefined") {
-      reveal();
-    } else {
-      observer = new IntersectionObserver((entries) => {
-        if (entries[0]?.isIntersecting) reveal();
-      }, { rootMargin: "240px" });
-      if (imageRef.current) observer.observe(imageRef.current);
-    }
-    return () => {
-      active = false;
-      observer?.disconnect();
-    };
-  }, [src, localSource]);
-
-  return <img ref={imageRef} src={resolvedSrc || undefined} loading="lazy" decoding="async" {...props} />;
-}
 
 function getLocalImageSource(row) {
   const local = String(row?.local_image_url || "");
@@ -89,18 +36,7 @@ const getName = (id) => {
   const me = getCurrentUser();
 
   const [order, setOrder] = useState(null);
-const [orderCollapsed, setOrderCollapsed] = useState(false);
-const [orderImageRows, setOrderImageRows] = useState([]);
-const [orderEditorOpen, setOrderEditorOpen] = useState(false);
-const [orderDraftTitle, setOrderDraftTitle] = useState("");
-const [orderDraftContent, setOrderDraftContent] = useState("");
-const [orderDraftImages, setOrderDraftImages] = useState([]);
-const [orderEditorDirty, setOrderEditorDirty] = useState(false);
-const [orderEditorSaving, setOrderEditorSaving] = useState(false);
-const [orderEditorError, setOrderEditorError] = useState("");
-const orderEditorDirtyRef = useRef(false);
-const lastChatScrollRef = useRef(0);
-const ignoreAutoResizeUntilRef = useRef(0);
+const [orderShrinkProgress, setOrderShrinkProgress] = useState(0);
 const bodyRef = useRef(null);
 const inputRef = useRef(null);
 const realtimeReadyRef = useRef(false);
@@ -147,8 +83,6 @@ function openOrderViewer(index) {
   }
   setViewerIndex(index);
   setViewerImageSrc(source);
-  if (/^(blob:|data:)/i.test(source)) return;
-  void cacheImage(source).then((cachedSource) => setViewerImageSrc(cachedSource || source));
 }
 
 function openChatViewer(imageList, index) {
@@ -160,24 +94,11 @@ function openChatViewer(imageList, index) {
   }
   setChatViewer({ imgs: imageList, i: index });
   setChatViewerImageSrc(source);
-  if (/^(blob:|data:)/i.test(source)) return;
-  void cacheImage(source).then((cachedSource) => setChatViewerImageSrc(cachedSource || source));
 }
 
 const handleChatScroll = (e) => {
   const top = e.currentTarget.scrollTop;
-  const previous = lastChatScrollRef.current;
-  lastChatScrollRef.current = top;
-
-  if (Date.now() < ignoreAutoResizeUntilRef.current) return;
-
-  if (!orderCollapsed && top > 40 && top > previous) {
-    ignoreAutoResizeUntilRef.current = Date.now() + 300;
-    setOrderCollapsed(true);
-  } else if (orderCollapsed && top <= 2 && top < previous) {
-    ignoreAutoResizeUntilRef.current = Date.now() + 300;
-    setOrderCollapsed(false);
-  }
+  setOrderShrinkProgress(Math.min(1, Math.max(0, top / 180)));
 };
 useEffect(() => {
   const run = async () => {
@@ -196,7 +117,6 @@ const loadOrder = async ({ remote = true } = {}) => {
   const localImages = (await getAllLocal("orderImages"))
     .filter((item) => String(item.order_id) === String(id));
   if (localOrder) {
-    setOrderImageRows(localImages);
     setOrder({
       ...localOrder,
       images: localImages.map(getLocalImageSource),
@@ -245,35 +165,20 @@ const loadOrder = async ({ remote = true } = {}) => {
   // A successful remote response is authoritative, so removed images do not
   // remain visible from an older local cache. Keep local rows only on error.
   const mergedImageRows = imgErr ? localImages : remoteImages;
-  setOrderImageRows(mergedImageRows);
   setOrder({
     ...(data || localOrder),
     images: mergedImageRows.map(getLocalImageSource),
   });
 };
 
-useEffect(() => {
-  if (!order || orderEditorDirtyRef.current) return;
-  setOrderDraftTitle(order.customer_name || order.title || "");
-  setOrderDraftContent(order.content || order.text || "");
-  setOrderDraftImages(orderImageRows.map((row) => ({
-    id: row.id,
-    src: getLocalImageSource(row),
-    imageUrl: row.image_url,
-    storagePath: row.storage_path || null,
-    isNew: false,
-  })));
-}, [order?.id, order?.content, order?.text, order?.updated_at, orderImageRows]);
-
-const scrollToLatestOnce = (messageCount) => {
+const scrollToLatestOnce = () => {
   if (initialChatScrollRef.current) return;
   initialChatScrollRef.current = true;
-  if (messageCount > 0) setOrderCollapsed(true);
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       if (!bodyRef.current) return;
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-      lastChatScrollRef.current = bodyRef.current.scrollTop;
+      setOrderShrinkProgress(Math.min(1, Math.max(0, bodyRef.current.scrollTop / 180)));
     });
   });
 };
@@ -291,7 +196,7 @@ async function loadChat({ remote = true, full = true } = {}) {
         .map(getLocalImageSource),
     })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     setMessages(cachedMessages);
-    scrollToLatestOnce(cachedMessages.length);
+    scrollToLatestOnce();
   }
 
   if (!remote) return;
@@ -353,7 +258,7 @@ async function loadChat({ remote = true, full = true } = {}) {
   })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   setMessages(merged);
-  scrollToLatestOnce(merged.length);
+  scrollToLatestOnce();
 }
 
 async function loadEditHistory() {
@@ -394,7 +299,8 @@ function historyChangeText(row) {
 }
 
 useEffect(() => {
-  loadOrder();
+  const timer = window.setTimeout(() => loadOrder(), 0);
+  return () => window.clearTimeout(timer);
 }, [id]);
 useEffect(() => {
   const channel = supabase
@@ -538,7 +444,8 @@ useEffect(() => {
 
 useEffect(() => {
   initialChatScrollRef.current = false;
-  loadChat();
+  const timer = window.setTimeout(() => loadChat(), 0);
+  return () => window.clearTimeout(timer);
 }, [id]);
 
   /* ================= MARK AS SEEN ================= */
@@ -567,6 +474,22 @@ useEffect(() => {
 
   if (!order) return null;
   const orderDisplayTitle = order.customer_name || order.title || "";
+  const shrink = orderShrinkProgress;
+  const adaptiveOrderBoxStyle = {
+    padding: `${12 - (4 * shrink)}px`,
+    maxHeight: `${900 - (750 * shrink)}px`,
+  };
+  const adaptiveOrderTextStyle = {
+    fontSize: `${22 - (5 * shrink)}px`,
+    lineHeight: 1.62 - (0.17 * shrink),
+  };
+  const adaptiveOrderTitleStyle = {
+    fontSize: `${23 - (4 * shrink)}px`,
+  };
+  const adaptiveOrderImageStyle = {
+    width: `${120 - (64 * shrink)}px`,
+    height: `${120 - (64 * shrink)}px`,
+  };
 
   /* ================= CHAT ================= */
   async function sendMessage() {
@@ -770,238 +693,16 @@ useEffect(() => {
     });
   }
 
-  function markOrderEditorDirty() {
-    orderEditorDirtyRef.current = true;
-    setOrderEditorDirty(true);
-    setOrderEditorError("");
-  }
-
-  function addOrderSelectedImages(fileList) {
-    const files = Array.from(fileList || []);
-    if (files.length === 0) return;
-    Promise.all(files.map((file) => new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (event) => resolve({
-        id: `local-order-image-${crypto.randomUUID()}`,
-        src: event.target.result,
-        imageUrl: null,
-        storagePath: null,
-        isNew: true,
-      });
-      reader.readAsDataURL(file);
-    }))).then((newImages) => {
-      setOrderDraftImages((current) => [...current, ...newImages]);
-      setOrderEditorOpen(true);
-      markOrderEditorDirty();
-    });
-  }
-
-  async function saveOrderUpdate() {
-    if (!order || orderEditorSaving) return;
-    setOrderEditorSaving(true);
-    setOrderEditorError("");
-
-    const now = new Date().toISOString();
-    const nextTitle = orderDraftTitle.trim();
-    const nextContent = orderDraftContent.trim();
-    const retainedRows = orderDraftImages.filter((image) => !image.isNew && image.id);
-    const retainedIds = new Set(retainedRows.map((image) => String(image.id)));
-    const removedRows = orderImageRows.filter((row) => !retainedIds.has(String(row.id)));
-    const newImages = orderDraftImages.filter((image) => image.isNew);
-
-    try {
-      const { data: updatedOrder, error: orderError } = await supabase
-        .from("orders")
-        .update({
-          title: nextTitle,
-          customer_name: nextTitle || null,
-          content: nextContent,
-          updated_at: now,
-        })
-        .eq("id", order.id)
-        .select()
-        .single();
-
-      if (orderError || !updatedOrder) {
-        console.log("UPDATE ORDER CONTENT ERROR:", orderError);
-        setOrderEditorError("Chưa cập nhật được đơn. Vui lòng thử lại.");
-        return;
-      }
-
-      if (removedRows.length > 0) {
-        const { error: deleteRowsError } = await supabase
-          .from("order_images")
-          .delete()
-          .in("id", removedRows.map((row) => row.id));
-        if (deleteRowsError) {
-          console.log("DELETE ORDER IMAGE ROWS ERROR:", deleteRowsError);
-          setOrderEditorError("Không xóa được một số ảnh của đơn. Vui lòng thử lại.");
-          return;
-        }
-
-        // Xóa file sau khi dòng liên kết đã xóa để không làm hỏng ảnh còn tham chiếu.
-        const removedStoragePaths = removedRows
-          .map(getOrderImageStoragePath)
-          .filter(Boolean);
-        if (removedStoragePaths.length > 0) {
-          const { error: storageError } = await supabase.storage
-            .from("order-images")
-            .remove(removedStoragePaths);
-          if (storageError) console.log("REMOVE ORDER IMAGE ERROR:", storageError);
-        }
-
-        for (const row of removedRows) {
-          await deleteLocal("orderImages", row.id);
-          void publishSyncEvent({
-            entityType: "order_image",
-            entityId: row.id,
-            operation: "delete",
-          });
-        }
-      }
-
-      const uploadedRows = [];
-      for (let index = 0; index < newImages.length; index += 1) {
-        const image = newImages[index];
-        const blob = await (await fetch(image.src)).blob();
-        const storagePath = `${order.id}_${Date.now()}_${index}.png`;
-        const { error: uploadError } = await supabase.storage
-          .from("order-images")
-          .upload(storagePath, blob, {
-            contentType: blob.type || "image/png",
-            cacheControl: "31536000",
-          });
-
-        if (uploadError) {
-          console.log("UPLOAD ORDER IMAGE ERROR:", uploadError);
-          continue;
-        }
-
-        const { data: publicUrlData } = supabase.storage
-          .from("order-images")
-          .getPublicUrl(storagePath);
-        const { data: savedRow, error: insertError } = await supabase
-          .from("order_images")
-          .insert({ order_id: order.id, image_url: publicUrlData.publicUrl })
-          .select()
-          .single();
-
-        if (insertError || !savedRow) {
-          console.log("INSERT ORDER IMAGE ERROR:", insertError);
-          await supabase.storage.from("order-images").remove([storagePath]);
-          continue;
-        }
-
-        const localRow = { ...savedRow, local_image_url: image.src };
-        uploadedRows.push(localRow);
-        await putLocal("orderImages", localRow);
-        void publishSyncEvent({
-          entityType: "order_image",
-          entityId: savedRow.id,
-          payload: savedRow,
-          storagePaths: [storagePath],
-        });
-      }
-
-      const nextRows = [
-        ...retainedRows.map((image) => ({
-          id: image.id,
-          order_id: order.id,
-          image_url: image.imageUrl,
-          local_image_url: image.src,
-          storage_path: image.storagePath || undefined,
-        })),
-        ...uploadedRows,
-      ];
-
-      let finalOrder = updatedOrder;
-      if (Boolean(updatedOrder.has_image) !== (nextRows.length > 0)) {
-        const { data: imageFlagOrder, error: imageFlagError } = await supabase
-          .from("orders")
-          .update({ has_image: nextRows.length > 0 })
-          .eq("id", order.id)
-          .select()
-          .single();
-        if (imageFlagError) console.log("UPDATE ORDER IMAGE FLAG ERROR:", imageFlagError);
-        if (imageFlagOrder) finalOrder = imageFlagOrder;
-      }
-
-      const { error: historyError } = await supabase.from("order_edit_history").insert({
-        order_id: order.id,
-        editor_id: me?.id || null,
-        editor_name: me?.name || me?.username || "Không rõ",
-        action: "quick_update",
-        before_data: {
-          title: order.customer_name || order.title || "",
-          content: order.content || order.text || "",
-          image_count: orderImageRows.length,
-        },
-        after_data: {
-          title: nextTitle,
-          content: nextContent,
-          image_count: nextRows.length,
-          added_images: newImages.length,
-          removed_images: removedRows.length,
-        },
-      });
-      if (historyError) console.log("SAVE ORDER HISTORY ERROR:", historyError);
-
-      const nextOrder = {
-        ...order,
-        ...finalOrder,
-        title: nextTitle,
-        customer_name: nextTitle || null,
-        content: nextContent,
-        has_image: nextRows.length > 0,
-        images: nextRows.map(getLocalImageSource),
-      };
-      setOrder(nextOrder);
-      setOrderImageRows(nextRows);
-      await putLocal("orders", finalOrder);
-      void publishSyncEvent({ entityType: "order", entityId: order.id, payload: finalOrder });
-
-      orderEditorDirtyRef.current = false;
-      setOrderEditorDirty(false);
-      setOrderDraftTitle(nextTitle);
-      setOrderDraftImages(nextRows.map((row) => ({
-        id: row.id,
-        src: getLocalImageSource(row),
-        imageUrl: row.image_url,
-        storagePath: row.storage_path || null,
-        isNew: false,
-      })));
-      const uploadFailed = uploadedRows.length !== newImages.length;
-      setOrderEditorOpen(uploadFailed);
-      if (uploadFailed) {
-        setOrderEditorError("Đã cập nhật nội dung, nhưng một số ảnh chưa tải lên được.");
-      }
-    } catch (error) {
-      console.log("SAVE ORDER UPDATE ERROR:", error);
-      setOrderEditorError("Có lỗi khi cập nhật đơn. Vui lòng thử lại.");
-    } finally {
-      setOrderEditorSaving(false);
-    }
-  }
-
-  function cancelOrderUpdate() {
-    orderEditorDirtyRef.current = false;
-    setOrderEditorDirty(false);
-    setOrderEditorError("");
-    setOrderDraftTitle(order?.customer_name || order?.title || "");
-    setOrderDraftContent(order?.content || order?.text || "");
-    setOrderDraftImages(orderImageRows.map((row) => ({
-      id: row.id,
-      src: getLocalImageSource(row),
-      imageUrl: row.image_url,
-      storagePath: row.storage_path || null,
-      isNew: false,
-    })));
-    setOrderEditorOpen(false);
+  function handlePasteImages(event) {
+    const pastedImages = getClipboardImageFiles(event);
+    if (pastedImages.length === 0) return;
+    event.preventDefault();
+    addSelectedImages(pastedImages);
   }
 
   /* ================= RENDER ================= */
   return (
-    <div style={S.page}>
+    <div style={S.page} onPaste={handlePasteImages}>
       <style>{`
         .orderViewerArrow {
           position: absolute; top: 50%; transform: translateY(-50%);
@@ -1053,14 +754,10 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         {/* ===== ORDER CONTENT ===== */}
         <div
           ref={orderTopRef}
-          style={{ ...S.orderBox, ...(orderCollapsed ? S.orderBoxCollapsed : {}) }}
-          onClick={() => {
-            ignoreAutoResizeUntilRef.current = Date.now() + 300;
-            setOrderCollapsed((value) => !value);
-          }}
+          style={{ ...S.orderBox, ...adaptiveOrderBoxStyle }}
         >
-          <div style={{ ...S.orderText, ...(orderCollapsed ? S.orderTextCollapsed : {}) }}>
-  <div style={S.orderTitleInside}>
+          <div style={{ ...S.orderText, ...adaptiveOrderTextStyle }}>
+  <div style={{ ...S.orderTitleInside, ...adaptiveOrderTitleStyle }}>
     {(!order.type || order.type === "normal") && order.pinned && (
       <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>
     )}
@@ -1070,19 +767,19 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     <span>{(!order.type || order.type === "normal") && "📦 "}{orderDisplayTitle}</span>
   </div>
 
-  <div style={{ marginTop: 6, ...(orderCollapsed ? S.orderContentCollapsed : {}) }}>
+  <div style={{ marginTop: 6 }}>
   {order.content}
 </div>
 </div>
 
           {order.images?.length > 0 && (
-  <div style={{ ...S.orderImages, ...(orderCollapsed ? S.orderImagesCollapsed : {}) }}>
+  <div style={S.orderImages}>
     {order.images.map((img, i) => (
-  <DeferredCachedImage
+  <img
     key={`${i}-${img}`}
-    src={getOrderImageThumbnail(img)}
+    src={img}
     alt=""
-    style={{ ...S.orderImg, ...(orderCollapsed ? S.orderImgCollapsed : {}) }}
+    style={{ ...S.orderImg, ...adaptiveOrderImageStyle }}
     onClick={(e) => {
       e.stopPropagation();
       openOrderViewer(i);
@@ -1092,101 +789,6 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
   </div>
 )}
         </div>
-
-
-        {/* ===== CẬP NHẬT TIÊU ĐỀ + NỘI DUNG ĐƠN TẠI CHỖ ===== */}
-        <div
-          style={S.orderUpdatePanel}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <textarea
-            value={orderEditorOpen ? `${orderDraftTitle}\n${orderDraftContent}` : ""}
-            rows={orderEditorOpen
-              ? Math.min(12, Math.max(5, `${orderDraftTitle}\n${orderDraftContent}`.split(/\r?\n/).length + 1))
-              : 1}
-            onFocus={() => setOrderEditorOpen(true)}
-            onChange={(event) => {
-              const separatorIndex = event.target.value.indexOf("\n");
-              if (separatorIndex < 0) {
-                setOrderDraftTitle(event.target.value);
-                setOrderDraftContent("");
-              } else {
-                setOrderDraftTitle(event.target.value.slice(0, separatorIndex));
-                setOrderDraftContent(event.target.value.slice(separatorIndex + 1));
-              }
-              markOrderEditorDirty();
-            }}
-            placeholder={orderEditorOpen
-              ? "Dòng đầu là tiêu đề; các dòng sau là nội dung..."
-              : "Chạm để xem, sửa hoặc xóa tiêu đề và nội dung đơn..."}
-            aria-label="Cập nhật tiêu đề và nội dung đơn"
-            style={{ ...S.orderUpdateInput, ...(orderEditorOpen ? S.orderUpdateInputOpen : {}) }}
-          />
-
-          {orderEditorOpen && (
-            <>
-              {orderDraftImages.length > 0 && (
-                <div style={S.orderDraftImages}>
-                  {orderDraftImages.map((image, index) => (
-                    <div key={image.id || `${image.src}-${index}`} style={S.orderDraftImageItem}>
-                      <img src={image.src} alt="" style={S.orderDraftImage} />
-                      <button
-                        type="button"
-                        aria-label="Xóa ảnh khỏi đơn"
-                        style={S.orderDraftRemove}
-                        onClick={() => {
-                          setOrderDraftImages((current) => current.filter((_, imageIndex) => imageIndex !== index));
-                          markOrderEditorDirty();
-                        }}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div style={S.orderUpdateTools}>
-                <label style={S.orderAddImage}>
-                  📷 Chụp ảnh
-                  <input
-                    hidden
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    onChange={(event) => {
-                      addOrderSelectedImages(event.target.files);
-                      event.target.value = "";
-                    }}
-                  />
-                </label>
-                <label style={S.orderAddImage}>
-                  🖼 Thêm ảnh vào đơn
-                  <input
-                    hidden
-                    type="file"
-                    multiple
-                    accept="image/*"
-                    onChange={(event) => {
-                      addOrderSelectedImages(event.target.files);
-                      event.target.value = "";
-                    }}
-                  />
-                </label>
-                <div style={S.orderUpdateActions}>
-                  <button type="button" style={S.orderCancelBtn} onClick={cancelOrderUpdate} disabled={orderEditorSaving}>
-                    Hủy
-                  </button>
-                  <button type="button" style={S.orderSaveBtn} onClick={saveOrderUpdate} disabled={orderEditorSaving || !orderEditorDirty}>
-                    {orderEditorSaving ? "Đang gửi..." : "Gửi lên"}
-                  </button>
-                </div>
-              </div>
-              {orderEditorError && <div style={S.orderUpdateError}>{orderEditorError}</div>}
-            </>
-          )}
-        </div>
-
         <div style={S.historyBar}>
           <button
             type="button"
@@ -1235,8 +837,8 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
                 <div
                   style={{
                     ...S.bubble,
-                    background: isOwner ? "#6fb7d6" : "#6b4f3a",
-                    color: isOwner ? "#000" : "#fff"
+                    background: isOwner ? "#f3dda9" : "#fffaf0",
+                    color: "#3d2b1b"
                   }}
                 >
                   <div style={S.msgHeader}>
@@ -1256,9 +858,9 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 {!m.recalled && m.text !== "Tin nhắn đã thu hồi" && m.images?.length > 0 && (
   <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
     {m.images.map((img, i) => (
-      <DeferredCachedImage
+      <img
   key={`${i}-${img}`}
-  src={getOrderImageThumbnail(img)}
+  src={img}
   alt=""
   style={{
     width: 120,
@@ -1330,10 +932,6 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
       ref={inputRef}
       value={text}
       onChange={e => setText(e.target.value)}
-      onFocus={() => {
-        ignoreAutoResizeUntilRef.current = Date.now() + 300;
-        setOrderCollapsed(true);
-      }}
       onKeyDown={handleKey}
       placeholder="Nhập tin nhắn..."
       style={S.input}
@@ -1481,8 +1079,8 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 const S = {
   page: {
     height: "100vh",
-    background: "#121212",
-    color: "#fff",
+    background: "#f5efe3",
+    color: "#3d2b1b",
     overflow: "hidden",
     },
 
@@ -1491,9 +1089,10 @@ const S = {
     top: 0,
     left: 0,
     right: 0,
-    background: "#1a1a1a",
+    background: "#fff7e6",
     padding: 12,
-    borderBottom: "1px solid #333",
+    borderBottom: "1px solid #d8b36a",
+    boxShadow: "0 3px 12px rgba(91,55,22,.12)",
     zIndex: 100
   },
 
@@ -1502,17 +1101,17 @@ const S = {
     alignItems: "center",
     gap: 6,
     minWidth: 0,
-    fontSize: 18,
+    fontSize: 21,
     fontWeight: 800,
-    color: "#ffcc00",
+    color: "#6f430d",
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis"
   },
 
   sub: {
-    fontSize: 12,
-    opacity: 0.8,
+    fontSize: 15,
+    color: "#745b3d",
     marginTop: 4
   },
 
@@ -1540,48 +1139,26 @@ const S = {
 },
 
   orderBox: {
-    background: "#1e1e1e",
+    background: "#fffaf0",
+    border: "1px solid #d8b36a",
     borderRadius: 12,
     padding: 12,
     scrollMarginTop: 170,
     position: "sticky",
     top: 0,
     zIndex: 30,
-    boxShadow: "0 8px 18px rgba(0,0,0,.35)",
-    cursor: "pointer",
+    boxShadow: "0 6px 18px rgba(91,55,22,.15)",
+    cursor: "default",
     maxHeight: 900,
     overflow: "hidden",
-    transition: "padding .18s ease"
-  },
-
-  orderBoxCollapsed: {
-    padding: "8px 10px",
-    maxHeight: 96,
-    overflowY: "hidden",
-    display: "flex",
-    alignItems: "center",
-    gap: 10
-  },
-
-  orderTextCollapsed: {
-    flex: 1,
-    minWidth: 0
-  },
-
-  orderContentCollapsed: {
-    display: "-webkit-box",
-    WebkitLineClamp: 2,
-    WebkitBoxOrient: "vertical",
-    overflow: "hidden",
-    fontSize: 12,
-    lineHeight: 1.25,
-    opacity: 0.82,
-    transition: "font-size .18s ease, opacity .18s ease"
+    transition: "padding .12s ease, max-height .12s ease"
   },
 
   orderText: {
     whiteSpace: "pre-wrap",
-    wordBreak: "break-word"
+    wordBreak: "break-word",
+    fontSize: 22,
+    lineHeight: 1.62,
   },
 
   orderTitleInside: {
@@ -1589,8 +1166,8 @@ const S = {
     alignItems: "center",
     gap: 6,
     minWidth: 0,
-    color: "#ffcc00",
-    fontSize: 18,
+    color: "#6f430d",
+    fontSize: 23,
     lineHeight: 1.2,
     fontWeight: 800,
     marginBottom: 6,
@@ -1606,7 +1183,7 @@ const S = {
     borderRadius: 20,
     background: "#ffd166",
     color: "#171717",
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: 900,
     whiteSpace: "nowrap",
   },
@@ -1619,7 +1196,7 @@ const S = {
     borderRadius: 20,
     background: "#ffd166",
     color: "#171717",
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: 900,
     whiteSpace: "nowrap",
   },
@@ -1631,14 +1208,6 @@ const S = {
     flexWrap: "wrap"
   },
 
-  orderImagesCollapsed: {
-    marginTop: 0,
-    flexWrap: "nowrap",
-    maxWidth: "46%",
-    overflow: "hidden",
-    flexShrink: 0
-  },
-
   orderImg: {
     width: 120,
     height: 120,
@@ -1646,129 +1215,6 @@ const S = {
     borderRadius: 8,
     cursor: "pointer",
     transition: "width .18s ease, height .18s ease"
-  },
-
-  orderImgCollapsed: {
-    width: 56,
-    height: 56,
-    borderRadius: 7,
-    flexShrink: 0
-  },
-
-  orderUpdatePanel: {
-    marginTop: 10,
-    padding: 6,
-    background: "#181818",
-    border: "1px solid #333",
-    borderRadius: 12,
-  },
-
-  orderUpdateInput: {
-    display: "block",
-    width: "100%",
-    boxSizing: "border-box",
-    minHeight: 44,
-    padding: "10px 12px",
-    background: "#242424",
-    border: "1px solid #3b3b3b",
-    borderRadius: 9,
-    color: "#fff",
-    font: "inherit",
-    fontSize: 14,
-    lineHeight: 1.4,
-    resize: "vertical",
-    outline: "none",
-  },
-
-  orderUpdateInputOpen: {
-    borderColor: "#d0a646",
-    boxShadow: "0 0 0 2px rgba(208,166,70,.14)",
-  },
-
-  orderDraftImages: {
-    display: "flex",
-    gap: 8,
-    flexWrap: "wrap",
-    marginTop: 10,
-  },
-
-  orderDraftImageItem: {
-    position: "relative",
-  },
-
-  orderDraftImage: {
-    width: 72,
-    height: 72,
-    objectFit: "cover",
-    borderRadius: 8,
-    display: "block",
-    border: "1px solid #444",
-  },
-
-  orderDraftRemove: {
-    position: "absolute",
-    top: -7,
-    right: -7,
-    width: 22,
-    height: 22,
-    border: "1px solid #fff",
-    borderRadius: "50%",
-    background: "#c62828",
-    color: "#fff",
-    fontSize: 16,
-    lineHeight: "18px",
-    padding: 0,
-    cursor: "pointer",
-  },
-
-  orderUpdateTools: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-    marginTop: 10,
-    flexWrap: "wrap",
-  },
-
-  orderAddImage: {
-    padding: "8px 10px",
-    border: "1px solid #444",
-    borderRadius: 8,
-    background: "#2a2a2a",
-    color: "#eee",
-    fontSize: 12,
-    cursor: "pointer",
-  },
-
-  orderUpdateActions: {
-    display: "flex",
-    gap: 8,
-    marginLeft: "auto",
-  },
-
-  orderCancelBtn: {
-    padding: "8px 12px",
-    border: "1px solid #444",
-    borderRadius: 8,
-    background: "#2a2a2a",
-    color: "#ddd",
-    cursor: "pointer",
-  },
-
-  orderSaveBtn: {
-    padding: "8px 14px",
-    border: "1px solid #d0a646",
-    borderRadius: 8,
-    background: "#d0a646",
-    color: "#171717",
-    fontWeight: 800,
-    cursor: "pointer",
-  },
-
-  orderUpdateError: {
-    marginTop: 8,
-    color: "#ffb4b4",
-    fontSize: 12,
   },
 
   historyBar: {
@@ -1779,62 +1225,65 @@ const S = {
 
   historyButton: {
     padding: "6px 10px",
-    border: "1px solid #3b3b3b",
+    border: "1px solid #d1aa62",
     borderRadius: 8,
-    background: "#1b1b1b",
-    color: "#bbb",
-    fontSize: 12,
+    background: "#fffaf0",
+    color: "#5f4a32",
+    fontSize: 15,
     cursor: "pointer",
   },
 
   historyPanel: {
     marginTop: 6,
     padding: 8,
-    border: "1px solid #333",
+    border: "1px solid #d8b36a",
     borderRadius: 10,
-    background: "#181818",
+    background: "#fffaf0",
     maxHeight: 220,
     overflowY: "auto",
   },
 
   historyEmpty: {
-    color: "#888",
-    fontSize: 12,
+    color: "#745b3d",
+    fontSize: 15,
     padding: 6,
     textAlign: "center",
   },
 
   historyRow: {
     padding: "8px 4px",
-    borderBottom: "1px solid #2f2f2f",
-    color: "#ddd",
-    fontSize: 12,
+    borderBottom: "1px solid #d8dee5",
+    color: "#4d3218",
+    fontSize: 15,
   },
 
   historyRowTop: {
     display: "flex",
     justifyContent: "space-between",
     gap: 8,
-    color: "#f1c75b",
+    color: "#6f430d",
     marginBottom: 3,
   },
 
   bubble: {
     maxWidth: "80%",
     borderRadius: 12,
-    padding: 10
+    padding: 12,
+    border: "1px solid #d4dbe3",
   },
 
   msgHeader: {
     display: "flex",
     justifyContent: "space-between",
-    fontSize: 12,
+    fontSize: 14,
     marginBottom: 6
   },
 
   msgText: {
     whiteSpace: "pre-wrap",
-    wordBreak: "break-word"
+    wordBreak: "break-word",
+    fontSize: 18,
+    lineHeight: 1.5,
   },
 
   recall: {
@@ -1842,7 +1291,7 @@ const S = {
   },
 
   seen: {
-    fontSize: 11,
+    fontSize: 13,
     marginTop: 4,
     opacity: 0.7
   },
@@ -1852,8 +1301,9 @@ const S = {
   bottom: 0,
   left: 0,
   right: 0,
-  background: "#1a1a1a",
-  borderTop: "1px solid #333",
+    background: "#fff7e6",
+    borderTop: "1px solid #d8b36a",
+    boxShadow: "0 -4px 16px rgba(91,55,22,.12)",
   padding: 10,
   zIndex: 200,
   display: "block"
@@ -1861,12 +1311,14 @@ const S = {
 
   input: {
     flex: 1,
-    background: "#2a2a2a",
-    border: "none",
-    color: "#fff",
+    background: "#fffaf0",
+    border: "1px solid #d1aa62",
+    color: "#3d2b1b",
     borderRadius: 8,
     padding: 8,
-    resize: "none"
+    resize: "none",
+    fontSize: 17,
+    lineHeight: 1.45,
   },
 
   inputBtns: {
@@ -1875,14 +1327,25 @@ const S = {
     gap: 6
   },
 
+  sendBtn: {
+    width: 44,
+    height: 44,
+    border: "none",
+    borderRadius: "50%",
+    background: "#b98224",
+    color: "#fffaf0",
+    fontSize: 20,
+    cursor: "pointer",
+  },
+
   btn: {
-  background: "#2c2c2c",
-  color: "#e0e0e0",
-  border: "1px solid #3a3a3a",
+  background: "#fff3d6",
+  color: "#4d3218",
+  border: "1px solid #d1aa62",
   borderRadius: 6,
   padding: "4px 8px",
-  fontSize: 12,
-  height: 28,
+  fontSize: 14,
+  height: 34,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -1896,8 +1359,8 @@ btnDanger: {
   border: "1px solid #b91c1c",
   borderRadius: 6,
   padding: "4px 8px",
-  fontSize: 12,
-  height: 28,
+  fontSize: 14,
+  height: 34,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -1911,8 +1374,8 @@ btnActive: {
   border: "1px solid #166534",
   borderRadius: 6,
   padding: "4px 8px",
-  fontSize: 12,
-  height: 28,
+  fontSize: 14,
+  height: 34,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -1921,12 +1384,12 @@ btnActive: {
 },
 
   nlBtn: {
-    background: "#444",
+    background: "#eadfc9",
     border: "none",
     borderRadius: 8,
     padding: "6px 10px",
     cursor: "pointer",
-    color: "#fff"
+    color: "#3d2b1b"
   },
 
   /* VIEWER */
@@ -2021,11 +1484,12 @@ chooseRow: {
 attachBtn: {
   flex: 1,
   padding: "9px 10px",
-  background: "#2b2b2b",
-  border: "1px solid #444",
+  background: "#fff3d6",
+  color: "#4d3218",
+  border: "1px solid #d1aa62",
   borderRadius: 10,
   textAlign: "center",
-  fontSize: 13,
+  fontSize: 15,
   cursor: "pointer",
 },
 

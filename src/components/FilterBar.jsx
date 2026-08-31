@@ -93,21 +93,27 @@ const styles = {
   },
 
   btn: {
-    background: "#333",
-    color: "white",
-    border: "none",
-    padding: "6px 8px",
+    background: "#fffaf0",
+    color: "#4d3218",
+    border: "1px solid #d5b477",
+    padding: "8px 11px",
     borderRadius: 8,
     cursor: "pointer",
     whiteSpace: "nowrap",
+    fontSize: 15,
   },
 
   active: {
-    background: "#2ecc71",
+    background: "#d3a13f",
+    color: "#3d260d",
+    borderColor: "#a8731f",
   },
 
   popup: {
-    background: "#222",
+    background: "#fffaf0",
+    color: "#3d2b1b",
+    border: "1px solid #d8b36a",
+    boxShadow: "0 4px 12px rgba(91,55,22,.12)",
     padding: 12,
     borderRadius: 10,
     marginBottom: 10,
@@ -116,7 +122,7 @@ const styles = {
   apply: {
     marginTop: 10,
     padding: "6px 12px",
-    background: "#2ecc71",
+    background: "#d3a13f",
     border: "none",
     borderRadius: 8,
     cursor: "pointer",

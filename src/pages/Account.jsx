@@ -77,7 +77,7 @@ function PermissionChecklist({ value, onChange }) {
         </button>
 
         {hasFull(perms) && (
-          <span style={{ fontSize: 12, color: "#b00" }}>
+          <span style={{ fontSize: 15, color: "#b00" }}>
             Đang bật Full quyền. Nếu tick lẻ, Full quyền sẽ tự tắt.
           </span>
         )}
@@ -85,7 +85,7 @@ function PermissionChecklist({ value, onChange }) {
 
       <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
         {PERMISSION_UI.map((group) => (
-          <div key={group.title} style={{ padding: 10, borderRadius: 10, background: "#fafafa" }}>
+          <div key={group.title} style={{ padding: 10, borderRadius: 10, background: "#fff7e6" }}>
             <div style={{ fontWeight: 700, marginBottom: 8 }}>{group.title}</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
               {group.items.map((it) => (
@@ -111,10 +111,10 @@ function btnMini() {
   return {
     padding: "6px 10px",
     borderRadius: 10,
-    border: "1px solid #ccc",
-    background: "white",
+    border: "1px solid #d1aa62",
+    background: "#fffaf0",
     cursor: "pointer",
-    fontSize: 12,
+    fontSize: 15,
   };
 }
 
@@ -122,11 +122,12 @@ function btnPrimary() {
   return {
     padding: "10px 14px",
     borderRadius: 12,
-    border: "1px solid #111",
-    background: "#111",
-    color: "white",
+    border: "1px solid #8a560f",
+    background: "#b98224",
+    color: "#fffaf0",
     cursor: "pointer",
     fontWeight: 700,
+    fontSize: 16,
   };
 }
 
@@ -138,17 +139,18 @@ function btnDangerMini() {
     background: "white",
     color: "#b00",
     cursor: "pointer",
-    fontSize: 12,
+    fontSize: 15,
     fontWeight: 700,
   };
 }
 
 function cardStyle() {
   return {
-    border: "1px solid #e5e5e5",
+    border: "1px solid #d8b36a",
     borderRadius: 14,
     padding: 14,
-    background: "white",
+    background: "#fffaf0",
+    boxShadow: "0 3px 12px rgba(91,55,22,.1)",
   };
 }
 
@@ -220,16 +222,6 @@ useEffect(() => {
   const canViewStats = hasPermission(PERMISSIONS.VIEW_STATS) || hasPermission(PERMISSIONS.FULL_ACCESS);
   const canReset = hasPermission(PERMISSIONS.RESET_DATA) || hasPermission(PERMISSIONS.FULL_ACCESS);
 
-  useEffect(() => {
-    // sync selected perms when select user
-    if (selectedUser) setEditPerms(normalizePerms(selectedUser.permissions));
-    else setEditPerms([]);
-  }, [selectedUserId]); // eslint-disable-line
-
-  useEffect(() => {
-  loadOrderStats();
-}, []);
-
   const refreshUsers = async () => {
   const u = await getUsers();
   setUsers(u);
@@ -272,6 +264,11 @@ const loadOrderStats = async () => {
     console.error(err);
   }
 };
+
+  useEffect(() => {
+    const timer = window.setTimeout(loadOrderStats, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const persistUsers = async (nextUsers) => {
   await saveUsers(nextUsers);
@@ -379,6 +376,7 @@ await persistUsers(nextUsers);   // 👈 thêm dòng này
 if (!ok) return alert("Xóa tài khoản thất bại.");
 
 setSelectedUserId(null);
+setEditPerms([]);
 await refreshUsers();
 alert("Đã xóa tài khoản.");
 };
@@ -420,11 +418,9 @@ alert("Đã xóa tài khoản.");
     resetAllData();
   };
 
-  const keyUsedText = stats.keyUsed ? ` (đọc từ key: ${stats.keyUsed})` : " (không tìm thấy dữ liệu orders)";
-
   return (
-    <div style={{ padding: 16, maxWidth: 980, margin: "0 auto" }}>
-      <h2 style={{ margin: "8px 0 14px" }}>Tài khoản</h2>
+    <div style={{ minHeight: "100dvh", padding: 16, paddingBottom: 80, maxWidth: 980, margin: "0 auto", background: "#f5efe3", color: "#3d2b1b", fontSize: 17 }}>
+      <h2 style={{ margin: "8px 0 14px", fontSize: 30 }}>Tài khoản</h2>
 
       {/* 1) My account */}
       <div style={cardStyle()}>
@@ -442,7 +438,7 @@ alert("Đã xóa tài khoản.");
 
           <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10, alignItems: "center" }}>
             <div style={{ fontWeight: 700 }}>Username</div>
-            <div style={{ padding: "10px 12px", border: "1px solid #eee", borderRadius: 12, background: "#fafafa" }}>
+            <div style={{ padding: "10px 12px", border: "1px solid #dec38d", borderRadius: 12, background: "#fff7e6" }}>
               {currentUser?.username || "(chưa đăng nhập)"}
             </div>
           </div>
@@ -488,7 +484,7 @@ alert("Đã xóa tài khoản.");
             <button type="button" onClick={onChangePassword} style={btnPrimary()}>
               Đổi mật khẩu
             </button>
-            <span style={{ fontSize: 12, color: "#666", alignSelf: "center" }}>
+            <span style={{ fontSize: 15, color: "#745b3d", alignSelf: "center" }}>
               * Quyền đổi mật khẩu được cấp bằng checkbox “Đổi mật khẩu”.
             </span>
           </div>
@@ -546,7 +542,10 @@ alert("Đã xóa tài khoản.");
                   <button
                     key={u.id}
                     type="button"
-                    onClick={() => setSelectedUserId(u.id)}
+                    onClick={() => {
+                      setSelectedUserId(u.id);
+                      setEditPerms(normalizePerms(u.permissions));
+                    }}
                     style={{
                       textAlign: "left",
                       padding: "10px 10px",
@@ -557,7 +556,7 @@ alert("Đã xóa tài khoản.");
                     }}
                   >
                     <div style={{ fontWeight: 700 }}>{u.name}</div>
-                    <div style={{ fontSize: 12, color: "#666" }}>
+                    <div style={{ fontSize: 15, color: "#745b3d" }}>
                       @{u.username} • {normalizePerms(u.permissions).length} quyền
                     </div>
                   </button>
@@ -581,8 +580,8 @@ alert("Đã xóa tài khoản.");
               ) : (
                 <>
                   <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontWeight: 800, fontSize: 16 }}>{selectedUser.name}</div>
-                    <div style={{ fontSize: 12, color: "#666" }}>@{selectedUser.username}</div>
+                    <div style={{ fontWeight: 800, fontSize: 19 }}>{selectedUser.name}</div>
+                    <div style={{ fontSize: 15, color: "#745b3d" }}>@{selectedUser.username}</div>
                   </div>
 
                   <PermissionChecklist value={editPerms} onChange={setEditPerms} />
@@ -632,7 +631,7 @@ alert("Đã xóa tài khoản.");
       {/* 6) Logout + Reset */}
       <div style={{ ...cardStyle(), marginTop: 12 }}>
         <h3 style={{ marginTop: 0 }}>6) Bộ nhớ thiết bị và đăng xuất</h3>
-        <div style={{ marginBottom: 12, color: "#555", fontSize: 13 }}>
+        <div style={{ marginBottom: 12, color: "#5f4a32", fontSize: 16 }}>
           Dùng nút này khi điện thoại còn hiện đơn, tin nhắn hoặc ảnh cũ. Nút chỉ dọn dữ liệu trên thiết bị đang dùng,
           không xóa tài khoản và không xóa trực tiếp dữ liệu Supabase.
         </div>
@@ -679,7 +678,7 @@ alert("Đã xóa tài khoản.");
         )}
       </div>
 
-      <div style={{ marginTop: 16, fontSize: 12, color: "#888" }}>
+      <div style={{ marginTop: 16, fontSize: 15, color: "#745b3d" }}>
         Ghi chú: admin mặc định là <b>admin / 123456</b> (chỉ tạo khi chưa có danh sách users trong localStorage).
       </div>
     </div>
@@ -694,11 +693,11 @@ function StatBox({ label, value }) {
         borderRadius: 10,
         padding: 12,
         minWidth: 150,
-        background: "#fafafa"
+        background: "#fff7e6"
       }}
     >
       <div style={{ fontSize: 22, fontWeight: "bold" }}>{value}</div>
-      <div style={{ fontSize: 13, color: "#666" }}>{label}</div>
+      <div style={{ fontSize: 16, color: "#745b3d" }}>{label}</div>
     </div>
   );
 }
@@ -707,8 +706,11 @@ function inputStyle() {
   return {
     padding: "10px 12px",
     borderRadius: 12,
-    border: "1px solid #ddd",
+    border: "1px solid #d1aa62",
+    background: "#fffaf0",
+    color: "#3d2b1b",
     outline: "none",
     width: "100%",
+    fontSize: 17,
   };
 }

@@ -100,8 +100,9 @@ const s = {
     width: "100%",
     zIndex: 20,
     height: "calc(56px + env(safe-area-inset-bottom))",
-    background: "#1a1a1a",
-    borderTop: "1px solid #2c2c2c",
+    background: "#fff7e6",
+    borderTop: "1px solid #d8b36a",
+    boxShadow: "0 -3px 12px rgba(91,55,22,.12)",
     display: "flex",
     alignItems: "center",
     padding: "0 8px env(safe-area-inset-bottom)",
@@ -116,12 +117,12 @@ const s = {
 
   item: {
     textAlign: "center",
-    color: "#ccc",
-    fontSize: 12,
+    color: "#745b3d",
+    fontSize: 14,
     cursor: "pointer"
   },
 
-  itemActive: { color: "#fff" },
+  itemActive: { color: "#8a560f", fontWeight: 800 },
 
   text: { marginTop: 1 },
 

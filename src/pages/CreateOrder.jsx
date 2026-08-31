@@ -14,6 +14,7 @@ import {
   putLocal,
   putOrderDraft,
 } from "../utils/localSync";
+import { getClipboardImageFiles } from "../utils/clipboardImages";
 
 function getStoragePath(row) {
   if (row?.storage_path) return row.storage_path;
@@ -157,6 +158,14 @@ const handleFiles = (fileList, openEditor = false) => {
     if (openEditor && newImages.length > 0) setEditingIndex(firstNewIndex);
   });
 };
+
+const handlePasteImages = (event) => {
+  const pastedImages = getClipboardImageFiles(event);
+  if (pastedImages.length === 0) return;
+  event.preventDefault();
+  handleFiles(pastedImages);
+};
+
 async function uploadOneImage(fileBase64, fileName) {
   const blob = await (await fetch(fileBase64)).blob();
 
@@ -393,7 +402,7 @@ return;
 }
 
   return (
-    <div style={S.page}>
+    <div style={S.page} onPaste={handlePasteImages}>
       <div style={S.header}>Tạo đơn</div>
 
       {/* chọn loại */}
@@ -561,12 +570,12 @@ return;
 const S = {
   page: {
     minHeight: "100dvh",
-    background: "#121212",
-    color: "#fff",
+    background: "#f5efe3",
+    color: "#3d2b1b",
     padding: 20
   },
   header: {
-    fontSize: 28,
+    fontSize: 30,
     fontWeight: 700,
     marginBottom: 20
   },
@@ -577,15 +586,15 @@ const S = {
   },
   modeBtn: {
     padding: "10px 14px",
-    background: "#2a2a2a",
-    border: "none",
-    color: "#fff",
+    background: "#fffaf0",
+    border: "1px solid #d5b477",
+    color: "#4d3218",
     borderRadius: 10,
     cursor: "pointer"
   },
   modeActive: {
-    background: "#2ecc71",
-    color: "#111",
+    background: "#d3a13f",
+    color: "#3d260d",
     fontWeight: 700
   },
   textarea: {
@@ -593,18 +602,21 @@ const S = {
     height: 200,
     padding: 12,
     borderRadius: 12,
-    border: "1px solid #333",
-    background: "#1a1a1a",
-    color: "#fff",
+    border: "1px solid #d1aa62",
+    background: "#fffaf0",
+    color: "#3d2b1b",
+    fontSize: 18,
+    lineHeight: 1.5,
     marginBottom: 20
   },
   customerInput: {
     width: "100%",
     padding: 12,
     borderRadius: 12,
-    border: "1px solid #d0a646",
-    background: "#1a1a1a",
-    color: "#fff",
+    border: "1px solid #c8952e",
+    background: "#fffaf0",
+    color: "#3d2b1b",
+    fontSize: 18,
     marginBottom: 10,
     boxSizing: "border-box",
   },
@@ -617,8 +629,10 @@ const S = {
     flex: 1,
     padding: 12,
     borderRadius: 10,
-    background: "#2a2a2a",
-    border: "1px solid #444",
+    background: "#fffaf0",
+    color: "#3d2b1b",
+    border: "1px solid #d1aa62",
+    fontSize: 16,
     textAlign: "center",
     cursor: "pointer",
   },
@@ -629,19 +643,19 @@ const S = {
   draftPanel: {
     marginTop: 18,
     padding: 12,
-    border: "1px solid #333",
+    border: "1px solid #d8b36a",
     borderRadius: 12,
-    background: "#191919",
+    background: "#fffaf0",
   },
   draftHeading: {
-    color: "#ffcc00",
+    color: "#6f430d",
     fontWeight: 700,
     marginBottom: 8,
   },
   draftEmpty: {
     padding: "10px 4px",
-    color: "#999",
-    fontSize: 13,
+    color: "#745b3d",
+    fontSize: 15,
   },
   draftRow: {
     display: "flex",
@@ -657,10 +671,10 @@ const S = {
     alignItems: "flex-start",
     gap: 3,
     padding: "9px 10px",
-    border: "1px solid #3b3b3b",
+    border: "1px solid #d8b36a",
     borderRadius: 9,
-    background: "#242424",
-    color: "#fff",
+    background: "#fff7e6",
+    color: "#3d2b1b",
     textAlign: "left",
     cursor: "pointer",
   },
@@ -668,32 +682,35 @@ const S = {
     width: 38,
     border: "1px solid #553333",
     borderRadius: 9,
-    background: "#321d1d",
-    color: "#ff9b9b",
+    background: "#fff0f0",
+    color: "#b42318",
     fontSize: 20,
     cursor: "pointer",
   },
   draftOpenHint: {
-    color: "#69c5ff",
+    color: "#8a560f",
     fontWeight: 700,
   },
   btnCancel: {
     flex: 1,
     padding: 14,
-    background: "#333",
-    color: "#fff",
-    border: "none",
+    background: "#eadfc9",
+    color: "#3d2b1b",
+    border: "1px solid #d1aa62",
     borderRadius: 12,
-    cursor: "pointer"
+    cursor: "pointer",
+    fontSize: 17,
+    fontWeight: 700,
   },
   btnOk: {
     flex: 1,
     padding: 14,
-    background: "#2ecc71",
-    color: "#111",
+    background: "#d3a13f",
+    color: "#3d260d",
     border: "none",
     borderRadius: 12,
-    fontWeight: 700,
+    fontWeight: 800,
+    fontSize: 17,
     cursor: "pointer"
   }
 };

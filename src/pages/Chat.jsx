@@ -3,8 +3,9 @@ import React, { lazy, Suspense, useEffect, useRef, useState, useCallback } from 
 import { supabase } from "../supabaseClient";
 import "../styles/chat.css";
 import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
-import { cacheImage, deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
+import { deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
 import { createImagePreviewBlob } from "../utils/imagePreview";
+import { getClipboardImageFiles } from "../utils/clipboardImages";
 import { useNavigate } from "react-router-dom";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
@@ -13,51 +14,9 @@ function format(ts) {
   return ts ? new Date(ts).toLocaleString() : "";
 }
 
-function getImageThumbnail(url) {
-  const source = String(url || "");
-  const marker = "/storage/v1/object/public/";
-  const markerIndex = source.indexOf(marker);
-  if (markerIndex < 0) return source;
-  const baseUrl = source.slice(0, markerIndex);
-  const storagePath = source.slice(markerIndex + marker.length).split("?")[0];
-  return `${baseUrl}/storage/v1/render/image/public/${storagePath}?width=360&height=360&resize=contain&quality=75`;
-}
-
 function getLocalImageSource(row) {
   const local = String(row?.local_image_url || "");
   return local.startsWith("data:") ? local : row?.image_url;
-}
-
-function DeferredCachedImage({ src, ...props }) {
-  const localSource = /^(blob:|data:)/i.test(String(src || ""));
-  const [resolvedSrc, setResolvedSrc] = useState(localSource ? src : "");
-  const imageRef = useRef(null);
-
-  useEffect(() => {
-    if (!src || localSource) return undefined;
-    let active = true;
-    let observer;
-    const reveal = () => {
-      void cacheImage(src).then((cachedSrc) => {
-        if (active) setResolvedSrc(cachedSrc || src);
-      });
-      observer?.disconnect();
-    };
-
-    if (typeof IntersectionObserver === "undefined") reveal();
-    else {
-      observer = new IntersectionObserver((entries) => {
-        if (entries[0]?.isIntersecting) reveal();
-      }, { rootMargin: "240px" });
-      if (imageRef.current) observer.observe(imageRef.current);
-    }
-    return () => {
-      active = false;
-      observer?.disconnect();
-    };
-  }, [src, localSource]);
-
-  return <img ref={imageRef} src={resolvedSrc || undefined} loading="lazy" decoding="async" {...props} />;
 }
 
 export default function Chat() {
@@ -88,8 +47,6 @@ export default function Chat() {
       return;
     }
     setViewerImageSrc(source);
-    if (/^(blob:|data:)/i.test(source)) return;
-    void cacheImage(source).then((cachedSource) => setViewerImageSrc(cachedSource || source));
   }, []);
 
   const openViewer = useCallback((images, index) => {
@@ -493,8 +450,15 @@ export default function Chat() {
     setTimeout(() => scrollToBottom(true), 50);
   };
 
+  const handlePasteImages = async (event) => {
+    const pastedImages = getClipboardImageFiles(event);
+    if (pastedImages.length === 0) return;
+    event.preventDefault();
+    await addSelectedImages(pastedImages);
+  };
+
   return (
-    <div className="chatPage">
+    <div className="chatPage" onPaste={handlePasteImages}>
       <div className="chatHeader">
         <button className="chatBack" onClick={() => navigate("/")} aria-label="Về trang chính">‹</button>
         <div className="chatTitle"><strong>Chat nội bộ</strong><small>{users.length} thành viên</small></div>
@@ -534,9 +498,9 @@ export default function Chat() {
                 {!!m.images?.length && (
                   <div className="msgImages">
                     {m.images.map((img, i) => (
-                      <DeferredCachedImage
+                      <img
                         key={`${i}-${img}`}
-                        src={getImageThumbnail(img)}
+                        src={img}
                         className="chatImg"
                         alt=""
                         onClick={() => openViewer(m.images, i)}

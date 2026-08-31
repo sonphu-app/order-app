@@ -58,7 +58,7 @@ navigate("/");
           Đăng nhập
         </button>
 
-        <p style={{ marginTop: 15, fontSize: 13 }}>
+        <p style={{ marginTop: 15, fontSize: 15 }}>
           Tài khoản mặc định: <b>admin / 123456</b>
         </p>
       </div>
@@ -72,37 +72,43 @@ const styles = {
     display: "flex",
     justifyContent: "center",
     alignItems: "center",
-    background: "#f4f6f8",
+    background: "#f5efe3",
   },
   box: {
     width: 320,
     padding: 30,
-    background: "white",
+    background: "#fffaf0",
     borderRadius: 10,
     boxShadow: "0 0 20px rgba(0,0,0,0.1)",
     textAlign: "center",
   },
   title: {
     marginBottom: 25,
+    fontSize: 30,
   },
   input: {
     width: "100%",
     padding: 12,
     marginBottom: 15,
     borderRadius: 6,
-    border: "1px solid #ccc",
+    border: "1px solid #d1aa62",
+    background: "#fffaf0",
+    color: "#3d2b1b",
+    fontSize: 17,
   },
   button: {
     width: "100%",
     padding: 12,
-    background: "#111",
-    color: "white",
+    background: "#b98224",
+    color: "#fffaf0",
     border: "none",
     borderRadius: 6,
     cursor: "pointer",
+    fontSize: 17,
+    fontWeight: 700,
   },
   error: {
     color: "red",
-    fontSize: 13,
+    fontSize: 15,
   },
 };
