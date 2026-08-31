@@ -13,6 +13,53 @@ function format(ts) {
   return ts ? new Date(ts).toLocaleString() : "";
 }
 
+function getImageThumbnail(url) {
+  const source = String(url || "");
+  const marker = "/storage/v1/object/public/";
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0) return source;
+  const baseUrl = source.slice(0, markerIndex);
+  const storagePath = source.slice(markerIndex + marker.length).split("?")[0];
+  return `${baseUrl}/storage/v1/render/image/public/${storagePath}?width=360&height=360&resize=contain&quality=75`;
+}
+
+function getLocalImageSource(row) {
+  const local = String(row?.local_image_url || "");
+  return local.startsWith("data:") ? local : row?.image_url;
+}
+
+function DeferredCachedImage({ src, ...props }) {
+  const localSource = /^(blob:|data:)/i.test(String(src || ""));
+  const [resolvedSrc, setResolvedSrc] = useState(localSource ? src : "");
+  const imageRef = useRef(null);
+
+  useEffect(() => {
+    if (!src || localSource) return undefined;
+    let active = true;
+    let observer;
+    const reveal = () => {
+      void cacheImage(src).then((cachedSrc) => {
+        if (active) setResolvedSrc(cachedSrc || src);
+      });
+      observer?.disconnect();
+    };
+
+    if (typeof IntersectionObserver === "undefined") reveal();
+    else {
+      observer = new IntersectionObserver((entries) => {
+        if (entries[0]?.isIntersecting) reveal();
+      }, { rootMargin: "240px" });
+      if (imageRef.current) observer.observe(imageRef.current);
+    }
+    return () => {
+      active = false;
+      observer?.disconnect();
+    };
+  }, [src, localSource]);
+
+  return <img ref={imageRef} src={resolvedSrc || undefined} loading="lazy" decoding="async" {...props} />;
+}
+
 export default function Chat() {
   const [users, setUsers] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -20,6 +67,7 @@ export default function Chat() {
   const [attachments, setAttachments] = useState([]);
   const [editingIndex, setEditingIndex] = useState(null);
   const [viewer, setViewer] = useState(null);
+  const [viewerImageSrc, setViewerImageSrc] = useState("");
   const [groupUnreadCount, setGroupUnreadCount] = useState(0);
 
   const inputRef = useRef(null);
@@ -27,10 +75,47 @@ export default function Chat() {
   const msgListRef = useRef(null);
   const reloadTimerRef = useRef(null);
   const viewerTouchRef = useRef(null);
+  const imageViewerHistoryRef = useRef(false);
   const realtimeReadyRef = useRef(false);
   const navigate = useNavigate();
 
   const me = getCurrentUser();
+
+  const showViewerImage = useCallback((images, index) => {
+    const source = images?.[index];
+    if (!source) {
+      setViewerImageSrc("");
+      return;
+    }
+    setViewerImageSrc(source);
+    if (/^(blob:|data:)/i.test(source)) return;
+    void cacheImage(source).then((cachedSource) => setViewerImageSrc(cachedSource || source));
+  }, []);
+
+  const openViewer = useCallback((images, index) => {
+    if (!images?.[index]) return;
+    if (!imageViewerHistoryRef.current) {
+      window.history.pushState({ ...window.history.state, sonphuImageViewer: true }, "");
+      imageViewerHistoryRef.current = true;
+    }
+    showViewerImage(images, index);
+    setViewer({ images, index });
+  }, [showViewerImage]);
+
+  const closeViewer = useCallback(() => {
+    const wasOpen = imageViewerHistoryRef.current;
+    imageViewerHistoryRef.current = false;
+    setViewer(null);
+    setViewerImageSrc("");
+    if (wasOpen) window.history.back();
+  }, []);
+
+  const moveViewer = useCallback((delta) => {
+    if (!viewer) return;
+    const nextIndex = Math.max(0, Math.min(viewer.images.length - 1, viewer.index + delta));
+    showViewerImage(viewer.images, nextIndex);
+    setViewer({ ...viewer, index: nextIndex });
+  }, [showViewerImage, viewer]);
 
   const getName = (id) => {
     const u = users.find((x) => x.id === id);
@@ -59,7 +144,7 @@ export default function Chat() {
   }, []);
 
   // ===== LOAD CHAT =====
-  const loadChat = useCallback(async ({ remote = true } = {}) => {
+  const loadChat = useCallback(async ({ remote = true, full = true } = {}) => {
     const localMessages = await getAllLocal("groupMessages");
     const localImages = await getAllLocal("groupMessageImages");
     if (localMessages.length > 0) {
@@ -67,16 +152,24 @@ export default function Chat() {
         ...message,
         images: localImages
           .filter((image) => String(image.message_id) === String(message.id))
-          .map((image) => image.local_image_url || image.image_url),
+          .map(getLocalImageSource),
       })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
     }
 
     if (!remote) return;
 
-    const { data } = await supabase
+    let messageQuery = supabase
       .from("group_messages")
       .select("*")
       .order("created_at", { ascending: true });
+    const latestLocalMessageAt = localMessages.reduce((latest, message) => {
+      const value = new Date(message.created_at || 0).getTime();
+      return value > latest ? value : latest;
+    }, 0);
+    if (!full && latestLocalMessageAt > 0) {
+      messageQuery = messageQuery.gt("created_at", new Date(latestLocalMessageAt).toISOString());
+    }
+    const { data } = await messageQuery;
 
     const safeData = data || [];
     await putManyLocal("groupMessages", safeData);
@@ -95,30 +188,18 @@ export default function Chat() {
       }));
       await putManyLocal("groupMessageImages", imgs);
 
-      void Promise.all(imgs.map(async (row) => ({
-        ...row,
-        local_image_url: await cacheImage(row.image_url),
-      }))).then(async (cachedRows) => {
-        await putManyLocal("groupMessageImages", cachedRows);
-        setMessages((current) => current.map((message) => ({
-          ...message,
-          images: cachedRows
-            .filter((image) => String(image.message_id) === String(message.id))
-            .map((image) => image.local_image_url || image.image_url),
-        })));
-      });
     }
 
-    const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
+    const messageMap = new Map((!full ? localMessages : []).map((message) => [String(message.id), message]));
     safeData.forEach((message) => messageMap.set(String(message.id), message));
-    const imageMap = new Map(localImages.map((image) => [String(image.id), image]));
+    const imageMap = new Map((!full ? localImages : []).map((image) => [String(image.id), image]));
     imgs.forEach((image) => imageMap.set(String(image.id), image));
     const allImages = [...imageMap.values()];
     const merged = [...messageMap.values()].map((m) => ({
       ...m,
       images: allImages
         .filter((i) => String(i.message_id) === String(m.id))
-        .map((i) => i.local_image_url || i.image_url)
+        .map(getLocalImageSource)
     })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
     setMessages(merged);
@@ -197,10 +278,7 @@ export default function Chat() {
         async (payload) => {
           if (payload.eventType === "DELETE") await deleteLocal("groupMessageImages", payload.old.id);
           else {
-            const row = {
-              ...payload.new,
-              local_image_url: await cacheImage(payload.new.image_url),
-            };
+            const row = { ...payload.new };
             await putLocal("groupMessageImages", row);
           }
           refreshImagesFromLocal();
@@ -224,11 +302,11 @@ export default function Chat() {
   useEffect(() => {
     const refresh = (force = false) => {
       if ((!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
-      loadChat();
+      loadChat({ full: force });
       loadUnread();
     };
     const onFocus = () => refresh(true);
-    const timer = window.setInterval(refresh, 12000);
+    const timer = window.setInterval(refresh, 60000);
     window.addEventListener("focus", onFocus);
     return () => {
       clearInterval(timer);
@@ -253,17 +331,24 @@ export default function Chat() {
   useEffect(() => {
     if (!viewer) return undefined;
     const onKey = (event) => {
-      if (event.key === "Escape") setViewer(null);
-      if (event.key === "ArrowLeft") {
-        setViewer((current) => current ? { ...current, index: Math.max(0, current.index - 1) } : current);
-      }
-      if (event.key === "ArrowRight") {
-        setViewer((current) => current ? { ...current, index: Math.min(current.images.length - 1, current.index + 1) } : current);
-      }
+      if (event.key === "Escape") closeViewer();
+      if (event.key === "ArrowLeft") moveViewer(-1);
+      if (event.key === "ArrowRight") moveViewer(1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [viewer]);
+  }, [closeViewer, moveViewer, viewer]);
+
+  useEffect(() => {
+    const handleBrowserBack = () => {
+      if (!imageViewerHistoryRef.current) return;
+      imageViewerHistoryRef.current = false;
+      setViewer(null);
+      setViewerImageSrc("");
+    };
+    window.addEventListener("popstate", handleBrowserBack);
+    return () => window.removeEventListener("popstate", handleBrowserBack);
+  }, []);
 
   // ===== MARK SEEN =====
   useEffect(() => {
@@ -449,11 +534,12 @@ export default function Chat() {
                 {!!m.images?.length && (
                   <div className="msgImages">
                     {m.images.map((img, i) => (
-                      <img
-                        key={i}
-                        src={img}
+                      <DeferredCachedImage
+                        key={`${i}-${img}`}
+                        src={getImageThumbnail(img)}
                         className="chatImg"
-                        onClick={() => setViewer({ images: m.images, index: i })}
+                        alt=""
+                        onClick={() => openViewer(m.images, i)}
                       />
                     ))}
                   </div>
@@ -558,12 +644,12 @@ export default function Chat() {
 
       {viewer && (
         <div className="viewer">
-          <button className="viewerClose" onClick={() => setViewer(null)}>
+          <button className="viewerClose" onClick={closeViewer}>
             ×
           </button>
 
           <img
-            src={viewer.images[viewer.index]}
+            src={viewerImageSrc || viewer.images[viewer.index]}
             className="viewerImg"
             alt=""
             onTouchStart={(event) => {
@@ -574,12 +660,7 @@ export default function Chat() {
               const end = event.changedTouches[0]?.clientX;
               viewerTouchRef.current = null;
               if (start == null || end == null || Math.abs(end - start) < 45) return;
-              setViewer((current) => ({
-                ...current,
-                index: end < start
-                  ? Math.min(current.images.length - 1, current.index + 1)
-                  : Math.max(0, current.index - 1),
-              }));
+                moveViewer(end < start ? 1 : -1);
             }}
           />
           {viewer.images.length > 1 && (
@@ -588,13 +669,13 @@ export default function Chat() {
                 type="button"
                 className="viewerArrow viewerArrowLeft"
                 disabled={viewer.index === 0}
-                onClick={() => setViewer((current) => ({ ...current, index: Math.max(0, current.index - 1) }))}
+                onClick={() => moveViewer(-1)}
               >‹</button>
               <button
                 type="button"
                 className="viewerArrow viewerArrowRight"
                 disabled={viewer.index === viewer.images.length - 1}
-                onClick={() => setViewer((current) => ({ ...current, index: Math.min(current.images.length - 1, current.index + 1) }))}
+                onClick={() => moveViewer(1)}
               >›</button>
             </>
           )}

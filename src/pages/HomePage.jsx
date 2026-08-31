@@ -45,6 +45,7 @@ function saveHomeView(next) {
 }
 
 const defaultFilterForStatus = (status) => status === "completed" ? "today" : "all";
+const ORDERS_PAGE_SIZE = 25;
 
 // Thẻ dùng một màu trung tính; trạng thái đã được tách thành từng tab riêng.
 const getCardColor = () => "#202020";
@@ -99,6 +100,49 @@ const S = {
     marginBottom: 6,
     textTransform: "uppercase",
   },
+  orderTitleHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    minWidth: 0,
+    lineHeight: 1.25,
+    color: "#ffcc00",
+    marginBottom: 6,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+  },
+  priorityInlineLabel: {
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    padding: "3px 7px",
+    borderRadius: 20,
+    background: "#ffd166",
+    color: "#171717",
+    fontSize: 10,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  },
+  reworkInlineLabel: {
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    padding: "3px 7px",
+    borderRadius: 20,
+    background: "#ffd166",
+    color: "#171717",
+    fontSize: 10,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  },
+  orderTitleText: {
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    fontSize: 15,
+    fontWeight: 800,
+    color: "#ffcc00",
+  },
   title: { fontSize: 22, fontWeight: 800 },
   time: { fontSize: 14, color: "#ddd" },
   text: {
@@ -107,6 +151,18 @@ const S = {
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
     overflowWrap: "anywhere",
+  },
+  loadMore: {
+    display: "block",
+    width: "100%",
+    margin: "2px 0 12px",
+    padding: "8px 12px",
+    border: "1px solid #3b3b3b",
+    borderRadius: 10,
+    background: "#1b1b1b",
+    color: "#bbb",
+    fontSize: 12,
+    cursor: "pointer",
   },
   statusBar: {
     position: "fixed",
@@ -141,13 +197,14 @@ const S = {
     flex: 1,
     minWidth: 0,
     minHeight: 36,
-    maxHeight: 64,
+    maxHeight: 140,
     borderRadius: 10,
     border: "1px solid #444",
     background: "#242424",
     color: "#fff",
     padding: "8px 11px",
     resize: "none",
+    overflowY: "auto",
     lineHeight: 1.25,
     fontFamily: "inherit",
   },
@@ -176,6 +233,18 @@ const S = {
     cursor: "pointer",
   }),
   statusCount: {
+    minWidth: 16,
+    height: 16,
+    padding: "0 4px",
+    borderRadius: 999,
+    background: "#2589d8",
+    color: "white",
+    fontSize: 9,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  unreadCount: {
     minWidth: 18,
     height: 18,
     padding: "0 4px",
@@ -186,19 +255,7 @@ const S = {
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-  },
-  unreadCount: {
-    minWidth: 18,
-    height: 18,
-    padding: "0 4px",
-    borderRadius: 999,
-    background: "#2589d8",
-    color: "white",
-    fontSize: 10,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    boxShadow: "0 0 0 2px rgba(37,137,216,.18)",
+    boxShadow: "0 0 0 2px rgba(216,58,58,.18)",
   },
 };
 
@@ -210,15 +267,25 @@ const location = useLocation();
   const [q, setQ] = useState(() => savedView.q || "");
   const [quickText, setQuickText] = useState("");
   const [quickSubmitting, setQuickSubmitting] = useState(false);
+  const quickInputRef = useRef(null);
   const [statusTab, setStatusTab] = useState(() => savedView.statusTab || "new");
   const [filter, setFilter] = useState(() => defaultFilterForStatus(savedView.statusTab || "new"));
 const [users, setUsers] = useState([]);
 const [orderUnreadMap, setOrderUnreadMap] = useState(() => homeMemory.orderUnreadMap);
 const [groupUnreadCount, setGroupUnreadCount] = useState(() => homeMemory.groupUnreadCount);
 const [focusOrderId, setFocusOrderId] = useState(() => location.state?.focusOrderId || null);
+const [visibleLimit, setVisibleLimit] = useState(ORDERS_PAGE_SIZE);
+const loadMoreRef = useRef(null);
 const restoredScrollRef = useRef(false);
 const handledNavigationRef = useRef(false);
-const realtimeReadyRef = useRef(false);
+  const realtimeReadyRef = useRef(false);
+
+  useEffect(() => {
+    const input = quickInputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+  }, [quickText]);
 
 useEffect(() => {
   homeMemory = { ...homeMemory, orders, orderUnreadMap, groupUnreadCount };
@@ -286,13 +353,15 @@ const loadUsersSupabase = async () => {
 
   setUsers(data || []);
 };
-const loadOrderUnreadCounts = async () => {
+const loadOrderUnreadCounts = async (orderId = null) => {
   const me = getCurrentUser();
   if (!me?.id) return;
 
-  const { data, error } = await supabase
+  let unreadQuery = supabase
     .from("order_messages")
     .select("id, order_id, sender_id, seen_by");
+  if (orderId) unreadQuery = unreadQuery.eq("order_id", orderId);
+  const { data, error } = await unreadQuery;
 
   if (error) {
     console.log("LOAD ORDER UNREAD ERROR:", error);
@@ -311,7 +380,16 @@ const loadOrderUnreadCounts = async () => {
     }
   });
 
-  setOrderUnreadMap(map);
+  if (orderId) {
+    setOrderUnreadMap((current) => {
+      const next = { ...current };
+      if (map[orderId]) next[orderId] = map[orderId];
+      else delete next[orderId];
+      return next;
+    });
+  } else {
+    setOrderUnreadMap(map);
+  }
 };
 
 const loadGroupUnreadCount = async () => {
@@ -433,8 +511,8 @@ useEffect(() => {
         schema: "public",
         table: "order_messages",
       },
-      () => {
-        loadOrderUnreadCounts();
+      (payload) => {
+        loadOrderUnreadCounts(payload.new?.order_id || payload.old?.order_id || null);
       }
     )
     .on(
@@ -467,7 +545,7 @@ useEffect(() => {
       const cached = await getAllLocal("orders");
       setOrders(cached.map(normalizeOrder));
     }
-    if (type === "order_message") loadOrderUnreadCounts();
+    if (type === "order_message") loadOrderUnreadCounts(event.detail?.payload?.order_id || null);
     if (type === "group_message") loadGroupUnreadCount();
   };
   window.addEventListener("sonphu-local-sync", refreshFromLocal);
@@ -481,13 +559,32 @@ useEffect(() => {
     if (polling || (!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
     polling = true;
     try {
-      const { data, error } = await supabase
+      const cached = await getAllLocal("orders");
+      const latestCachedAt = cached.reduce((latest, row) => {
+        const value = new Date(row.updated_at || row.created_at || 0).getTime();
+        return value > latest ? value : latest;
+      }, 0);
+      let ordersQuery = supabase
         .from("orders")
         .select("*")
         .order("updated_at", { ascending: false });
-      if (!error && data) {
+      if (!force && latestCachedAt > 0) {
+        ordersQuery = ordersQuery.gt("updated_at", new Date(latestCachedAt).toISOString());
+      }
+      const { data, error } = await ordersQuery;
+      if (!error && data?.length) {
         await putManyLocal("orders", data);
-        setOrders(data.map(normalizeOrder));
+        if (force) {
+          setOrders(data.map(normalizeOrder));
+        } else {
+          setOrders((current) => {
+            const merged = new Map(current.map((row) => [row.id, row]));
+            data.forEach((row) => merged.set(row.id, normalizeOrder(row)));
+            return [...merged.values()].sort((a, b) =>
+              new Date(b.lastActionAt || b.createdAt).getTime() - new Date(a.lastActionAt || a.createdAt).getTime()
+            );
+          });
+        }
       }
       await Promise.all([loadOrderUnreadCounts(), loadGroupUnreadCount()]);
     } finally {
@@ -495,7 +592,7 @@ useEffect(() => {
     }
   };
   const onFocus = () => refresh(true);
-  const timer = window.setInterval(refresh, 15000);
+  const timer = window.setInterval(refresh, 60000);
   window.addEventListener("focus", onFocus);
   return () => {
     clearInterval(timer);
@@ -687,6 +784,26 @@ const updateOrder = async (id, action) => {
   }
 
   const nextOrder = { ...current, ...updateData };
+  const { error: historyError } = await supabase.from("order_edit_history").insert({
+    order_id: id,
+    editor_id: me?.id || null,
+    editor_name: actorName,
+    action: "status",
+    before_data: {
+      status: current.status || "",
+      done_by_name: current.doneByName || current.done_by_name || "",
+      delivered_by_name: current.deliveredByName || current.delivered_by_name || "",
+      completed_by_name: current.completedByName || current.completed_by_name || "",
+    },
+    after_data: {
+      status: updateData.status || current.status || "",
+      done_by_name: updateData.done_by_name || current.doneByName || "",
+      delivered_by_name: updateData.delivered_by_name || current.deliveredByName || "",
+      completed_by_name: updateData.completed_by_name || current.completedByName || "",
+    },
+  });
+  if (historyError) console.log("SAVE STATUS HISTORY ERROR:", historyError);
+
   await putLocal("orders", nextOrder);
   setOrders((currentOrders) => currentOrders.map((item) => item.id === id ? normalizeOrder(nextOrder) : item));
   void publishSyncEvent({ entityType: "order", entityId: id, payload: nextOrder });
@@ -724,7 +841,9 @@ const updateOrder = async (id, action) => {
     const [showToggle, setShowToggle] = useState(false);
     const textRef = useRef(null);
 
-    const fullText = (o.title ? o.title + "\n" : "") + (o.content || "");
+    const displayTitle = o.customer_name || o.title || "";
+    const isNormalOrder = !o.type || o.type === "normal";
+    const fullText = (isNormalOrder ? "" : (displayTitle ? displayTitle + "\n" : "")) + (o.content || "");
 
     useEffect(() => {
       const el = textRef.current;
@@ -735,7 +854,7 @@ const updateOrder = async (id, action) => {
 
       if (el.scrollHeight > maxHeight + 2) setShowToggle(true);
       else setShowToggle(false);
-    }, [o.title, o.content]);
+    }, [o.title, o.customer_name, o.content]);
 
     return (
       <div
@@ -783,15 +902,11 @@ const updateOrder = async (id, action) => {
             <div style={S.systemHeader}>🛠 NHIỆM VỤ HỆ THỐNG</div>
           )}
 
-          {o.customer_name && (
-            <div style={{ color: "#f1c75b", fontWeight: 800, fontSize: 15 }}>
-              👤 {o.customer_name}
-            </div>
-          )}
-
-          {o.needs_rework && (
-            <div style={{ color: "#ffcf5a", fontWeight: 900, fontSize: 13 }}>
-              🔁 CẦN LÀM LẠI
+          {isNormalOrder && (
+            <div style={S.orderTitleHeader}>
+              {o.pinned && <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>}
+              {o.needs_rework && <span style={S.reworkInlineLabel}>🔁 CẦN LÀM LẠI</span>}
+              <span style={S.orderTitleText}>📦 {displayTitle || "Đơn hàng"}</span>
             </div>
           )}
 
@@ -857,7 +972,9 @@ const updateOrder = async (id, action) => {
   {metaText || formatTime(o.lastActionAt || o.createdAt)}
 </div>
 
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{children}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {children}
+          </div>
         </div>
       </div>
     );
@@ -909,7 +1026,8 @@ const createQuickOrder = async () => {
   const content = lines.join("\n").trim();
   if (!title || quickSubmitting || !hasPermission(PERMISSIONS.CREATE_ORDER)) return;
   setQuickSubmitting(true);
-  const me = getCurrentUser() || {};
+const me = getCurrentUser() || {};
+  const now = new Date().toISOString();
   const { data, error } = await supabase.from("orders").insert({
     type: "normal",
     title,
@@ -922,6 +1040,7 @@ const createQuickOrder = async () => {
     has_image: false,
     understood_by: [],
     required_users: [],
+    updated_at: now,
   }).select().single();
   setQuickSubmitting(false);
   if (error || !data) {
@@ -959,6 +1078,26 @@ const visibleOrders = q.trim() ? sorted : sorted.filter((o) => {
   return showInCompleted(o);
 });
 
+const allVisibleOrders = visibleOrders;
+const pagedOrders = allVisibleOrders.slice(0, visibleLimit);
+
+useEffect(() => {
+  setVisibleLimit(ORDERS_PAGE_SIZE);
+}, [statusTab, filter, q]);
+
+useEffect(() => {
+  if (!loadMoreRef.current || pagedOrders.length >= allVisibleOrders.length) return undefined;
+  if (typeof IntersectionObserver === "undefined") return undefined;
+
+  const observer = new IntersectionObserver((entries) => {
+    if (entries[0]?.isIntersecting) {
+      setVisibleLimit((current) => Math.min(current + ORDERS_PAGE_SIZE, allVisibleOrders.length));
+    }
+  }, { rootMargin: "240px" });
+  observer.observe(loadMoreRef.current);
+  return () => observer.disconnect();
+}, [pagedOrders.length, allVisibleOrders.length]);
+
 useEffect(() => {
   if (!focusOrderId || !visibleOrders.some((item) => item.id === focusOrderId)) return;
   const timer = setTimeout(() => {
@@ -993,7 +1132,7 @@ const sectionForOrder = (orderItem) => {
       <FilterBar value={filter} onChange={setFilter} />
 
       <div style={S.section}>{q.trim() ? "Kết quả tìm kiếm" : statusTabs.find((tab) => tab.key === statusTab)?.label}</div>
-      {visibleOrders.map((o) => {
+      {pagedOrders.map((o) => {
         const cardSection = q.trim() ? sectionForOrder(o) : statusTab;
         return (
         <Card key={o.id} o={o} metaText={getMetaText(o, cardSection)}>
@@ -1022,7 +1161,7 @@ const sectionForOrder = (orderItem) => {
               <>
                 {hasPermission(PERMISSIONS.EDIT_ORDER) && (
                   <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
-                    📌 {o.pinned ? "Ưu tiên" : "Ghim"}
+                    📌 {o.pinned ? "Bỏ ưu tiên" : "Ghim"}
                   </Btn>
                 )}
                 {hasPermission(PERMISSIONS.MARK_DONE) && (
@@ -1059,13 +1198,25 @@ const sectionForOrder = (orderItem) => {
         </Card>
       );})}
 
-      {visibleOrders.length === 0 && (
+      {pagedOrders.length < allVisibleOrders.length && (
+        <button
+          ref={loadMoreRef}
+          type="button"
+          style={S.loadMore}
+          onClick={() => setVisibleLimit((current) => Math.min(current + ORDERS_PAGE_SIZE, allVisibleOrders.length))}
+        >
+          Xem thêm đơn
+        </button>
+      )}
+
+      {pagedOrders.length === 0 && (
         <div style={{ color: "#888", textAlign: "center", padding: "36px 12px" }}>Chưa có đơn trong mục này.</div>
       )}
 
       {hasPermission(PERMISSIONS.CREATE_ORDER) && (
         <div style={S.quickBar}>
           <textarea
+            ref={quickInputRef}
             style={S.quickInput}
             rows={1}
             enterKeyHint="enter"

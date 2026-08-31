@@ -15,6 +15,66 @@ import { createImagePreviewBlob } from "../utils/imagePreview";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
 
+function getOrderImageStoragePath(row) {
+  if (row?.storage_path) return row.storage_path;
+  const marker = "/storage/v1/object/public/order-images/";
+  const url = String(row?.image_url || "");
+  const markerIndex = url.indexOf(marker);
+  if (markerIndex < 0) return null;
+  return decodeURIComponent(url.slice(markerIndex + marker.length).split("?")[0]);
+}
+
+function getOrderImageThumbnail(url) {
+  const source = String(url || "");
+  const marker = "/storage/v1/object/public/";
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0) return source;
+  const baseUrl = source.slice(0, markerIndex);
+  const storagePath = source.slice(markerIndex + marker.length).split("?")[0];
+  return `${baseUrl}/storage/v1/render/image/public/${storagePath}?width=360&height=360&resize=contain&quality=75`;
+}
+
+function DeferredCachedImage({ src, ...props }) {
+  const localSource = /^(blob:|data:)/i.test(String(src || ""));
+  const [resolvedSrc, setResolvedSrc] = useState(localSource ? src : "");
+  const imageRef = useRef(null);
+
+  useEffect(() => {
+    if (!src || localSource) return undefined;
+    let active = true;
+    let observer;
+    const reveal = () => {
+      void cacheImage(src).then((cachedSrc) => {
+        if (!active) return;
+        setResolvedSrc(cachedSrc || src);
+      });
+      observer?.disconnect();
+    };
+
+    if (typeof IntersectionObserver === "undefined") {
+      reveal();
+    } else {
+      observer = new IntersectionObserver((entries) => {
+        if (entries[0]?.isIntersecting) reveal();
+      }, { rootMargin: "240px" });
+      if (imageRef.current) observer.observe(imageRef.current);
+    }
+    return () => {
+      active = false;
+      observer?.disconnect();
+    };
+  }, [src, localSource]);
+
+  return <img ref={imageRef} src={resolvedSrc || undefined} loading="lazy" decoding="async" {...props} />;
+}
+
+function getLocalImageSource(row) {
+  const local = String(row?.local_image_url || "");
+  // Data URLs are created locally while uploading. Other local_image_url values
+  // may be stale object URLs after a page reload, so use the durable public URL.
+  return local.startsWith("data:") ? local : row?.image_url;
+}
+
 export default function OrderDetail() {
 const [users, setUsers] = useState([]);
 
@@ -30,6 +90,15 @@ const getName = (id) => {
 
   const [order, setOrder] = useState(null);
 const [orderCollapsed, setOrderCollapsed] = useState(false);
+const [orderImageRows, setOrderImageRows] = useState([]);
+const [orderEditorOpen, setOrderEditorOpen] = useState(false);
+const [orderDraftTitle, setOrderDraftTitle] = useState("");
+const [orderDraftContent, setOrderDraftContent] = useState("");
+const [orderDraftImages, setOrderDraftImages] = useState([]);
+const [orderEditorDirty, setOrderEditorDirty] = useState(false);
+const [orderEditorSaving, setOrderEditorSaving] = useState(false);
+const [orderEditorError, setOrderEditorError] = useState("");
+const orderEditorDirtyRef = useRef(false);
 const lastChatScrollRef = useRef(0);
 const ignoreAutoResizeUntilRef = useRef(0);
 const bodyRef = useRef(null);
@@ -41,17 +110,59 @@ const [images, setImages] = useState([]);
   // CHAT
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyRows, setHistoryRows] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   // IMAGE VIEWER (AN TOÀN)
   const [viewerIndex, setViewerIndex] = useState(-1); // -1 = đóng
+  const [viewerImageSrc, setViewerImageSrc] = useState("");
 
   const orderTopRef = useRef(null);
   const bottomRef = useRef(null);
 const [editIndex, setEditIndex] = useState(-1);
 // VIEWER cho ảnh trong CHAT
 const [chatViewer, setChatViewer] = useState(null); 
+const [chatViewerImageSrc, setChatViewerImageSrc] = useState("");
 const viewerTouchRef = useRef(null);
+const imageViewerHistoryRef = useRef(null);
 // null | { imgs: string[], i: number }
+
+function closeImageViewer() {
+  const wasOpen = imageViewerHistoryRef.current;
+  imageViewerHistoryRef.current = null;
+  setViewerIndex(-1);
+  setChatViewer(null);
+  setViewerImageSrc("");
+  setChatViewerImageSrc("");
+  if (wasOpen) window.history.back();
+}
+
+function openOrderViewer(index) {
+  const source = order?.images?.[index];
+  if (!source) return;
+  if (!imageViewerHistoryRef.current) {
+    window.history.pushState({ ...window.history.state, sonphuImageViewer: true }, "");
+    imageViewerHistoryRef.current = "order";
+  }
+  setViewerIndex(index);
+  setViewerImageSrc(source);
+  if (/^(blob:|data:)/i.test(source)) return;
+  void cacheImage(source).then((cachedSource) => setViewerImageSrc(cachedSource || source));
+}
+
+function openChatViewer(imageList, index) {
+  const source = imageList?.[index];
+  if (!source) return;
+  if (!imageViewerHistoryRef.current) {
+    window.history.pushState({ ...window.history.state, sonphuImageViewer: true }, "");
+    imageViewerHistoryRef.current = "chat";
+  }
+  setChatViewer({ imgs: imageList, i: index });
+  setChatViewerImageSrc(source);
+  if (/^(blob:|data:)/i.test(source)) return;
+  void cacheImage(source).then((cachedSource) => setChatViewerImageSrc(cachedSource || source));
+}
 
 const handleChatScroll = (e) => {
   const top = e.currentTarget.scrollTop;
@@ -85,9 +196,10 @@ const loadOrder = async ({ remote = true } = {}) => {
   const localImages = (await getAllLocal("orderImages"))
     .filter((item) => String(item.order_id) === String(id));
   if (localOrder) {
+    setOrderImageRows(localImages);
     setOrder({
       ...localOrder,
-      images: localImages.map((item) => item.local_image_url || item.image_url),
+      images: localImages.map(getLocalImageSource),
     });
   }
 
@@ -108,7 +220,7 @@ const loadOrder = async ({ remote = true } = {}) => {
   if (data) {
     setOrder({
       ...data,
-      images: localImages.map((item) => item.local_image_url || item.image_url),
+      images: localImages.map(getLocalImageSource),
     });
   }
 
@@ -130,21 +242,28 @@ const loadOrder = async ({ remote = true } = {}) => {
     local_image_url: localImageById.get(String(row.id))?.local_image_url,
   }));
   await putManyLocal("orderImages", remoteImages);
-  const imageMap = new Map(localImages.map((row) => [String(row.id), row]));
-  remoteImages.forEach((row) => imageMap.set(String(row.id), row));
+  // A successful remote response is authoritative, so removed images do not
+  // remain visible from an older local cache. Keep local rows only on error.
+  const mergedImageRows = imgErr ? localImages : remoteImages;
+  setOrderImageRows(mergedImageRows);
   setOrder({
     ...(data || localOrder),
-    images: [...imageMap.values()].map((row) => row.local_image_url || row.image_url),
-  });
-
-  void Promise.all(remoteImages.map(async (row) => ({
-    ...row,
-    local_image_url: await cacheImage(row.image_url),
-  }))).then(async (cachedRows) => {
-    await putManyLocal("orderImages", cachedRows);
-    await loadOrder({ remote: false });
+    images: mergedImageRows.map(getLocalImageSource),
   });
 };
+
+useEffect(() => {
+  if (!order || orderEditorDirtyRef.current) return;
+  setOrderDraftTitle(order.customer_name || order.title || "");
+  setOrderDraftContent(order.content || order.text || "");
+  setOrderDraftImages(orderImageRows.map((row) => ({
+    id: row.id,
+    src: getLocalImageSource(row),
+    imageUrl: row.image_url,
+    storagePath: row.storage_path || null,
+    isNew: false,
+  })));
+}, [order?.id, order?.content, order?.text, order?.updated_at, orderImageRows]);
 
 const scrollToLatestOnce = (messageCount) => {
   if (initialChatScrollRef.current) return;
@@ -160,7 +279,7 @@ const scrollToLatestOnce = (messageCount) => {
 };
 
 /* ================= LOAD CHAT ================= */
-async function loadChat({ remote = true } = {}) {
+async function loadChat({ remote = true, full = true } = {}) {
   const localMessages = (await getAllLocal("orderMessages"))
     .filter((message) => String(message.order_id) === String(id));
   const localMessageImages = await getAllLocal("orderMessageImages");
@@ -169,7 +288,7 @@ async function loadChat({ remote = true } = {}) {
       ...message,
       images: localMessageImages
         .filter((image) => String(image.message_id) === String(message.id))
-        .map((image) => image.local_image_url || image.image_url),
+        .map(getLocalImageSource),
     })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     setMessages(cachedMessages);
     scrollToLatestOnce(cachedMessages.length);
@@ -177,11 +296,19 @@ async function loadChat({ remote = true } = {}) {
 
   if (!remote) return;
 
-  const { data: msgs, error: msgErr } = await supabase
+  let messageQuery = supabase
     .from("order_messages")
     .select("*")
     .eq("order_id", id)
     .order("created_at", { ascending: true });
+  const latestLocalMessageAt = localMessages.reduce((latest, message) => {
+    const value = new Date(message.created_at || 0).getTime();
+    return value > latest ? value : latest;
+  }, 0);
+  if (!full && latestLocalMessageAt > 0) {
+    messageQuery = messageQuery.gt("created_at", new Date(latestLocalMessageAt).toISOString());
+  }
+  const { data: msgs, error: msgErr } = await messageQuery;
 
   if (msgErr) {
     console.log("LOAD MSG ERROR:", msgErr);
@@ -208,30 +335,62 @@ async function loadChat({ remote = true } = {}) {
       }));
       await putManyLocal("orderMessageImages", imgs);
 
-      void Promise.all(imgs.map(async (row) => ({
-        ...row,
-        local_image_url: await cacheImage(row.image_url),
-      }))).then(async (cachedRows) => {
-        await putManyLocal("orderMessageImages", cachedRows);
-        await loadChat({ remote: false });
-      });
     }
   }
 
-  const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
+  const messageMap = new Map((msgErr || !full ? localMessages : [])
+    .map((message) => [String(message.id), message]));
   (msgs || []).forEach((message) => messageMap.set(String(message.id), message));
-  const imageMap = new Map(localMessageImages.map((image) => [String(image.id), image]));
+  const imageMap = new Map((msgErr || !full ? localMessageImages : [])
+    .map((image) => [String(image.id), image]));
   imgs.forEach((image) => imageMap.set(String(image.id), image));
   const allImages = [...imageMap.values()];
   const merged = [...messageMap.values()].map((m) => ({
     ...m,
     images: allImages
       .filter((img) => String(img.message_id) === String(m.id))
-      .map((img) => img.local_image_url || img.image_url),
+      .map(getLocalImageSource),
   })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   setMessages(merged);
   scrollToLatestOnce(merged.length);
+}
+
+async function loadEditHistory() {
+  setHistoryLoading(true);
+  const localRows = (await getAllLocal("orderEditHistory"))
+    .filter((row) => String(row.order_id) === String(id))
+    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  if (localRows.length > 0) setHistoryRows(localRows);
+
+  const { data, error } = await supabase
+    .from("order_edit_history")
+    .select("*")
+    .eq("order_id", id)
+    .order("created_at", { ascending: false });
+  if (error) {
+    console.log("LOAD ORDER HISTORY ERROR:", error);
+    if (localRows.length === 0) setHistoryRows([]);
+  } else {
+    await putManyLocal("orderEditHistory", data || []);
+    setHistoryRows(data || []);
+  }
+  setHistoryLoading(false);
+}
+
+function historyChangeText(row) {
+  const before = row.before_data || {};
+  const after = row.after_data || {};
+  if (row.action === "status") {
+    return `Trạng thái: ${before.status || "-"} → ${after.status || "-"}`;
+  }
+  const changes = [];
+  if (before.title !== after.title) changes.push("tiêu đề");
+  if (before.content !== after.content) changes.push("nội dung");
+  if (before.image_count !== after.image_count) changes.push("ảnh");
+  if (after.added_images) changes.push(`thêm ${after.added_images} ảnh`);
+  if (after.removed_images) changes.push(`xóa ${after.removed_images} ảnh`);
+  return changes.length > 0 ? `Đã cập nhật ${changes.join(", ")}` : "Đã cập nhật đơn";
 }
 
 useEffect(() => {
@@ -286,10 +445,7 @@ useEffect(() => {
         if (payload.eventType === "DELETE") {
           await deleteLocal("orderImages", payload.old.id);
         } else {
-          const row = {
-            ...payload.new,
-            local_image_url: await cacheImage(payload.new.image_url),
-          };
+          const row = { ...payload.new };
           await putLocal("orderImages", row);
         }
         loadOrder({ remote: false });
@@ -301,10 +457,7 @@ useEffect(() => {
       async (payload) => {
         if (payload.eventType === "DELETE") await deleteLocal("orderMessageImages", payload.old.id);
         else {
-          const row = {
-            ...payload.new,
-            local_image_url: await cacheImage(payload.new.image_url),
-          };
+          const row = { ...payload.new };
           await putLocal("orderMessageImages", row);
         }
         loadChat({ remote: false });
@@ -336,10 +489,10 @@ useEffect(() => {
   const refresh = (force = false) => {
     if ((!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
     loadOrder();
-    loadChat();
+    loadChat({ full: force });
   };
   const onFocus = () => refresh(true);
-  const timer = window.setInterval(refresh, 12000);
+  const timer = window.setInterval(refresh, 60000);
   window.addEventListener("focus", onFocus);
   return () => {
     clearInterval(timer);
@@ -351,25 +504,37 @@ useEffect(() => {
   if (viewerIndex < 0 && !chatViewer) return undefined;
   const onKey = (event) => {
     if (event.key === "Escape") {
-      setViewerIndex(-1);
-      setChatViewer(null);
+      closeImageViewer();
     }
     if (viewerIndex >= 0 && event.key === "ArrowLeft") {
-      setViewerIndex((current) => Math.max(0, current - 1));
+      openOrderViewer(viewerIndex - 1);
     }
     if (viewerIndex >= 0 && event.key === "ArrowRight") {
-      setViewerIndex((current) => Math.min((order?.images?.length || 1) - 1, current + 1));
+      openOrderViewer(viewerIndex + 1);
     }
     if (chatViewer && event.key === "ArrowLeft") {
-      setChatViewer((current) => current ? { ...current, i: Math.max(0, current.i - 1) } : current);
+      openChatViewer(chatViewer.imgs, chatViewer.i - 1);
     }
     if (chatViewer && event.key === "ArrowRight") {
-      setChatViewer((current) => current ? { ...current, i: Math.min(current.imgs.length - 1, current.i + 1) } : current);
+      openChatViewer(chatViewer.imgs, chatViewer.i + 1);
     }
   };
   window.addEventListener("keydown", onKey);
   return () => window.removeEventListener("keydown", onKey);
 }, [viewerIndex, chatViewer, order?.images?.length]);
+
+useEffect(() => {
+  const handleBrowserBack = () => {
+    if (!imageViewerHistoryRef.current) return;
+    imageViewerHistoryRef.current = null;
+    setViewerIndex(-1);
+    setChatViewer(null);
+    setViewerImageSrc("");
+    setChatViewerImageSrc("");
+  };
+  window.addEventListener("popstate", handleBrowserBack);
+  return () => window.removeEventListener("popstate", handleBrowserBack);
+}, []);
 
 useEffect(() => {
   initialChatScrollRef.current = false;
@@ -401,6 +566,7 @@ useEffect(() => {
 }, [messages, me?.id]);
 
   if (!order) return null;
+  const orderDisplayTitle = order.customer_name || order.title || "";
 
   /* ================= CHAT ================= */
   async function sendMessage() {
@@ -604,6 +770,235 @@ useEffect(() => {
     });
   }
 
+  function markOrderEditorDirty() {
+    orderEditorDirtyRef.current = true;
+    setOrderEditorDirty(true);
+    setOrderEditorError("");
+  }
+
+  function addOrderSelectedImages(fileList) {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    Promise.all(files.map((file) => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (event) => resolve({
+        id: `local-order-image-${crypto.randomUUID()}`,
+        src: event.target.result,
+        imageUrl: null,
+        storagePath: null,
+        isNew: true,
+      });
+      reader.readAsDataURL(file);
+    }))).then((newImages) => {
+      setOrderDraftImages((current) => [...current, ...newImages]);
+      setOrderEditorOpen(true);
+      markOrderEditorDirty();
+    });
+  }
+
+  async function saveOrderUpdate() {
+    if (!order || orderEditorSaving) return;
+    setOrderEditorSaving(true);
+    setOrderEditorError("");
+
+    const now = new Date().toISOString();
+    const nextTitle = orderDraftTitle.trim();
+    const nextContent = orderDraftContent.trim();
+    const retainedRows = orderDraftImages.filter((image) => !image.isNew && image.id);
+    const retainedIds = new Set(retainedRows.map((image) => String(image.id)));
+    const removedRows = orderImageRows.filter((row) => !retainedIds.has(String(row.id)));
+    const newImages = orderDraftImages.filter((image) => image.isNew);
+
+    try {
+      const { data: updatedOrder, error: orderError } = await supabase
+        .from("orders")
+        .update({
+          title: nextTitle,
+          customer_name: nextTitle || null,
+          content: nextContent,
+          updated_at: now,
+        })
+        .eq("id", order.id)
+        .select()
+        .single();
+
+      if (orderError || !updatedOrder) {
+        console.log("UPDATE ORDER CONTENT ERROR:", orderError);
+        setOrderEditorError("Chưa cập nhật được đơn. Vui lòng thử lại.");
+        return;
+      }
+
+      if (removedRows.length > 0) {
+        const { error: deleteRowsError } = await supabase
+          .from("order_images")
+          .delete()
+          .in("id", removedRows.map((row) => row.id));
+        if (deleteRowsError) {
+          console.log("DELETE ORDER IMAGE ROWS ERROR:", deleteRowsError);
+          setOrderEditorError("Không xóa được một số ảnh của đơn. Vui lòng thử lại.");
+          return;
+        }
+
+        // Xóa file sau khi dòng liên kết đã xóa để không làm hỏng ảnh còn tham chiếu.
+        const removedStoragePaths = removedRows
+          .map(getOrderImageStoragePath)
+          .filter(Boolean);
+        if (removedStoragePaths.length > 0) {
+          const { error: storageError } = await supabase.storage
+            .from("order-images")
+            .remove(removedStoragePaths);
+          if (storageError) console.log("REMOVE ORDER IMAGE ERROR:", storageError);
+        }
+
+        for (const row of removedRows) {
+          await deleteLocal("orderImages", row.id);
+          void publishSyncEvent({
+            entityType: "order_image",
+            entityId: row.id,
+            operation: "delete",
+          });
+        }
+      }
+
+      const uploadedRows = [];
+      for (let index = 0; index < newImages.length; index += 1) {
+        const image = newImages[index];
+        const blob = await (await fetch(image.src)).blob();
+        const storagePath = `${order.id}_${Date.now()}_${index}.png`;
+        const { error: uploadError } = await supabase.storage
+          .from("order-images")
+          .upload(storagePath, blob, {
+            contentType: blob.type || "image/png",
+            cacheControl: "31536000",
+          });
+
+        if (uploadError) {
+          console.log("UPLOAD ORDER IMAGE ERROR:", uploadError);
+          continue;
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from("order-images")
+          .getPublicUrl(storagePath);
+        const { data: savedRow, error: insertError } = await supabase
+          .from("order_images")
+          .insert({ order_id: order.id, image_url: publicUrlData.publicUrl })
+          .select()
+          .single();
+
+        if (insertError || !savedRow) {
+          console.log("INSERT ORDER IMAGE ERROR:", insertError);
+          await supabase.storage.from("order-images").remove([storagePath]);
+          continue;
+        }
+
+        const localRow = { ...savedRow, local_image_url: image.src };
+        uploadedRows.push(localRow);
+        await putLocal("orderImages", localRow);
+        void publishSyncEvent({
+          entityType: "order_image",
+          entityId: savedRow.id,
+          payload: savedRow,
+          storagePaths: [storagePath],
+        });
+      }
+
+      const nextRows = [
+        ...retainedRows.map((image) => ({
+          id: image.id,
+          order_id: order.id,
+          image_url: image.imageUrl,
+          local_image_url: image.src,
+          storage_path: image.storagePath || undefined,
+        })),
+        ...uploadedRows,
+      ];
+
+      let finalOrder = updatedOrder;
+      if (Boolean(updatedOrder.has_image) !== (nextRows.length > 0)) {
+        const { data: imageFlagOrder, error: imageFlagError } = await supabase
+          .from("orders")
+          .update({ has_image: nextRows.length > 0 })
+          .eq("id", order.id)
+          .select()
+          .single();
+        if (imageFlagError) console.log("UPDATE ORDER IMAGE FLAG ERROR:", imageFlagError);
+        if (imageFlagOrder) finalOrder = imageFlagOrder;
+      }
+
+      const { error: historyError } = await supabase.from("order_edit_history").insert({
+        order_id: order.id,
+        editor_id: me?.id || null,
+        editor_name: me?.name || me?.username || "Không rõ",
+        action: "quick_update",
+        before_data: {
+          title: order.customer_name || order.title || "",
+          content: order.content || order.text || "",
+          image_count: orderImageRows.length,
+        },
+        after_data: {
+          title: nextTitle,
+          content: nextContent,
+          image_count: nextRows.length,
+          added_images: newImages.length,
+          removed_images: removedRows.length,
+        },
+      });
+      if (historyError) console.log("SAVE ORDER HISTORY ERROR:", historyError);
+
+      const nextOrder = {
+        ...order,
+        ...finalOrder,
+        title: nextTitle,
+        customer_name: nextTitle || null,
+        content: nextContent,
+        has_image: nextRows.length > 0,
+        images: nextRows.map(getLocalImageSource),
+      };
+      setOrder(nextOrder);
+      setOrderImageRows(nextRows);
+      await putLocal("orders", finalOrder);
+      void publishSyncEvent({ entityType: "order", entityId: order.id, payload: finalOrder });
+
+      orderEditorDirtyRef.current = false;
+      setOrderEditorDirty(false);
+      setOrderDraftTitle(nextTitle);
+      setOrderDraftImages(nextRows.map((row) => ({
+        id: row.id,
+        src: getLocalImageSource(row),
+        imageUrl: row.image_url,
+        storagePath: row.storage_path || null,
+        isNew: false,
+      })));
+      const uploadFailed = uploadedRows.length !== newImages.length;
+      setOrderEditorOpen(uploadFailed);
+      if (uploadFailed) {
+        setOrderEditorError("Đã cập nhật nội dung, nhưng một số ảnh chưa tải lên được.");
+      }
+    } catch (error) {
+      console.log("SAVE ORDER UPDATE ERROR:", error);
+      setOrderEditorError("Có lỗi khi cập nhật đơn. Vui lòng thử lại.");
+    } finally {
+      setOrderEditorSaving(false);
+    }
+  }
+
+  function cancelOrderUpdate() {
+    orderEditorDirtyRef.current = false;
+    setOrderEditorDirty(false);
+    setOrderEditorError("");
+    setOrderDraftTitle(order?.customer_name || order?.title || "");
+    setOrderDraftContent(order?.content || order?.text || "");
+    setOrderDraftImages(orderImageRows.map((row) => ({
+      id: row.id,
+      src: getLocalImageSource(row),
+      imageUrl: row.image_url,
+      storagePath: row.storage_path || null,
+      isNew: false,
+    })));
+    setOrderEditorOpen(false);
+  }
+
   /* ================= RENDER ================= */
   return (
     <div style={S.page}>
@@ -622,9 +1017,15 @@ useEffect(() => {
       {/* ===== HEADER ===== */}
       <div style={S.header}>
         <div style={S.title}>
-  {order.type === "system_task" && "🚨 NHIỆM VỤ HỆ THỐNG"}
+{order.type === "system_task" && "🚨 NHIỆM VỤ HỆ THỐNG"}
 {order.type === "system_message" && "📢 TIN NHẮN HỆ THỐNG"}
-  {(!order.type || order.type === "normal") && order.title}
+{(!order.type || order.type === "normal") && (
+  <>
+    {order.pinned && <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>}
+    {order.needs_rework && <span style={S.reworkInlineLabel}>🔁 CẦN LÀM LẠI</span>}
+    <span>📦 {orderDisplayTitle}</span>
+  </>
+)}
 </div>
 
         Đã xong: {["done", "delivered", "completed"].includes(order.status) ? "✓" : "-"} |
@@ -660,14 +1061,14 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         >
           <div style={{ ...S.orderText, ...(orderCollapsed ? S.orderTextCollapsed : {}) }}>
   <div style={S.orderTitleInside}>
-    {order.title}
+    {(!order.type || order.type === "normal") && order.pinned && (
+      <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>
+    )}
+    {(!order.type || order.type === "normal") && order.needs_rework && (
+      <span style={S.reworkInlineLabel}>🔁 CẦN LÀM LẠI</span>
+    )}
+    <span>{(!order.type || order.type === "normal") && "📦 "}{orderDisplayTitle}</span>
   </div>
-
-  {order.customer_name && (
-    <div style={{ color: "#f1c75b", fontWeight: 800, marginTop: 5 }}>
-      👤 {order.customer_name}
-    </div>
-  )}
 
   <div style={{ marginTop: 6, ...(orderCollapsed ? S.orderContentCollapsed : {}) }}>
   {order.content}
@@ -677,19 +1078,145 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
           {order.images?.length > 0 && (
   <div style={{ ...S.orderImages, ...(orderCollapsed ? S.orderImagesCollapsed : {}) }}>
     {order.images.map((img, i) => (
-  <img
-    key={i}
-    src={img}
+  <DeferredCachedImage
+    key={`${i}-${img}`}
+    src={getOrderImageThumbnail(img)}
+    alt=""
     style={{ ...S.orderImg, ...(orderCollapsed ? S.orderImgCollapsed : {}) }}
     onClick={(e) => {
       e.stopPropagation();
-      setViewerIndex(i);
+      openOrderViewer(i);
     }}
   />
 ))}
   </div>
 )}
         </div>
+
+
+        {/* ===== CẬP NHẬT TIÊU ĐỀ + NỘI DUNG ĐƠN TẠI CHỖ ===== */}
+        <div
+          style={S.orderUpdatePanel}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <textarea
+            value={orderEditorOpen ? `${orderDraftTitle}\n${orderDraftContent}` : ""}
+            rows={orderEditorOpen
+              ? Math.min(12, Math.max(5, `${orderDraftTitle}\n${orderDraftContent}`.split(/\r?\n/).length + 1))
+              : 1}
+            onFocus={() => setOrderEditorOpen(true)}
+            onChange={(event) => {
+              const separatorIndex = event.target.value.indexOf("\n");
+              if (separatorIndex < 0) {
+                setOrderDraftTitle(event.target.value);
+                setOrderDraftContent("");
+              } else {
+                setOrderDraftTitle(event.target.value.slice(0, separatorIndex));
+                setOrderDraftContent(event.target.value.slice(separatorIndex + 1));
+              }
+              markOrderEditorDirty();
+            }}
+            placeholder={orderEditorOpen
+              ? "Dòng đầu là tiêu đề; các dòng sau là nội dung..."
+              : "Chạm để xem, sửa hoặc xóa tiêu đề và nội dung đơn..."}
+            aria-label="Cập nhật tiêu đề và nội dung đơn"
+            style={{ ...S.orderUpdateInput, ...(orderEditorOpen ? S.orderUpdateInputOpen : {}) }}
+          />
+
+          {orderEditorOpen && (
+            <>
+              {orderDraftImages.length > 0 && (
+                <div style={S.orderDraftImages}>
+                  {orderDraftImages.map((image, index) => (
+                    <div key={image.id || `${image.src}-${index}`} style={S.orderDraftImageItem}>
+                      <img src={image.src} alt="" style={S.orderDraftImage} />
+                      <button
+                        type="button"
+                        aria-label="Xóa ảnh khỏi đơn"
+                        style={S.orderDraftRemove}
+                        onClick={() => {
+                          setOrderDraftImages((current) => current.filter((_, imageIndex) => imageIndex !== index));
+                          markOrderEditorDirty();
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={S.orderUpdateTools}>
+                <label style={S.orderAddImage}>
+                  📷 Chụp ảnh
+                  <input
+                    hidden
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={(event) => {
+                      addOrderSelectedImages(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <label style={S.orderAddImage}>
+                  🖼 Thêm ảnh vào đơn
+                  <input
+                    hidden
+                    type="file"
+                    multiple
+                    accept="image/*"
+                    onChange={(event) => {
+                      addOrderSelectedImages(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <div style={S.orderUpdateActions}>
+                  <button type="button" style={S.orderCancelBtn} onClick={cancelOrderUpdate} disabled={orderEditorSaving}>
+                    Hủy
+                  </button>
+                  <button type="button" style={S.orderSaveBtn} onClick={saveOrderUpdate} disabled={orderEditorSaving || !orderEditorDirty}>
+                    {orderEditorSaving ? "Đang gửi..." : "Gửi lên"}
+                  </button>
+                </div>
+              </div>
+              {orderEditorError && <div style={S.orderUpdateError}>{orderEditorError}</div>}
+            </>
+          )}
+        </div>
+
+        <div style={S.historyBar}>
+          <button
+            type="button"
+            style={S.historyButton}
+            onClick={async () => {
+              if (!historyOpen) await loadEditHistory();
+              setHistoryOpen((current) => !current);
+            }}
+          >
+            {historyOpen ? "Ẩn lịch sử" : "Xem lịch sử thay đổi"}
+          </button>
+        </div>
+
+        {historyOpen && (
+          <div style={S.historyPanel}>
+            {historyLoading && <div style={S.historyEmpty}>Đang tải lịch sử...</div>}
+            {!historyLoading && historyRows.length === 0 && (
+              <div style={S.historyEmpty}>Chưa có lịch sử thay đổi.</div>
+            )}
+            {!historyLoading && historyRows.map((row) => (
+              <div key={row.id} style={S.historyRow}>
+                <div style={S.historyRowTop}>
+                  <strong>{row.editor_name || "Không rõ"}</strong>
+                  <span>{row.created_at ? new Date(row.created_at).toLocaleString() : ""}</span>
+                </div>
+                <div>{historyChangeText(row)}</div>
+              </div>
+            ))}
+          </div>
+        )}
 
 
         {/* ===== CHAT ===== */}
@@ -729,9 +1256,9 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 {!m.recalled && m.text !== "Tin nhắn đã thu hồi" && m.images?.length > 0 && (
   <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
     {m.images.map((img, i) => (
-      <img
-  key={i}
-  src={img}
+      <DeferredCachedImage
+  key={`${i}-${img}`}
+  src={getOrderImageThumbnail(img)}
   alt=""
   style={{
     width: 120,
@@ -740,7 +1267,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     borderRadius: 12,
     cursor: "pointer"
   }}
-  onClick={() => setChatViewer({ imgs: m.images, i })}
+  onClick={() => openChatViewer(m.images, i)}
 />
     ))}
   </div>
@@ -831,19 +1358,19 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
   <div style={S.viewerOverlay}>
     <div
       style={S.viewerBackdrop}
-      onClick={() => setViewerIndex(-1)}
+      onClick={closeImageViewer}
     />
 
     <div style={S.viewerBox}>
       <button
         style={S.viewerClose}
-        onClick={() => setViewerIndex(-1)}
+        onClick={closeImageViewer}
       >
         ✕
       </button>
 
       <img
-        src={order.images[viewerIndex]}
+        src={viewerImageSrc || order.images[viewerIndex]}
         alt=""
         style={S.viewerImg}
         onTouchStart={(event) => {
@@ -854,19 +1381,17 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
           const end = event.changedTouches[0]?.clientX;
           viewerTouchRef.current = null;
           if (start == null || end == null || Math.abs(end - start) < 45) return;
-          setViewerIndex((current) => Math.max(
-            0,
-            Math.min(order.images.length - 1, current + (end < start ? 1 : -1))
-          ));
+          const nextIndex = Math.max(0, Math.min(order.images.length - 1, viewerIndex + (end < start ? 1 : -1)));
+          openOrderViewer(nextIndex);
         }}
       />
       <div style={S.viewerCounter}>{viewerIndex + 1}/{order.images.length} • Vuốt để xem</div>
       {order.images.length > 1 && (
         <>
           <button className="orderViewerArrow orderViewerArrowLeft" disabled={viewerIndex === 0}
-            onClick={() => setViewerIndex((current) => Math.max(0, current - 1))}>‹</button>
+            onClick={() => openOrderViewer(viewerIndex - 1)}>‹</button>
           <button className="orderViewerArrow orderViewerArrowRight" disabled={viewerIndex === order.images.length - 1}
-            onClick={() => setViewerIndex((current) => Math.min(order.images.length - 1, current + 1))}>›</button>
+            onClick={() => openOrderViewer(viewerIndex + 1)}>›</button>
         </>
       )}
     </div>
@@ -909,19 +1434,19 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
   <div style={S.viewerOverlay}>
     <div
       style={S.viewerBackdrop}
-      onClick={() => setChatViewer(null)}
+      onClick={closeImageViewer}
     />
 
     <div style={S.viewerBox}>
       <button
         style={S.viewerClose}
-        onClick={() => setChatViewer(null)}
+        onClick={closeImageViewer}
       >
         ✕
       </button>
 
       <img
-        src={chatViewer.imgs[chatViewer.i]}
+        src={chatViewerImageSrc || chatViewer.imgs[chatViewer.i]}
         alt=""
         style={S.viewerImg}
         onTouchStart={(event) => {
@@ -932,19 +1457,17 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
           const end = event.changedTouches[0]?.clientX;
           viewerTouchRef.current = null;
           if (start == null || end == null || Math.abs(end - start) < 45) return;
-          setChatViewer((current) => ({
-            ...current,
-            i: Math.max(0, Math.min(current.imgs.length - 1, current.i + (end < start ? 1 : -1))),
-          }));
+          const nextIndex = Math.max(0, Math.min(chatViewer.imgs.length - 1, chatViewer.i + (end < start ? 1 : -1)));
+          openChatViewer(chatViewer.imgs, nextIndex);
         }}
       />
       <div style={S.viewerCounter}>{chatViewer.i + 1}/{chatViewer.imgs.length} • Vuốt để xem</div>
       {chatViewer.imgs.length > 1 && (
         <>
           <button className="orderViewerArrow orderViewerArrowLeft" disabled={chatViewer.i === 0}
-            onClick={() => setChatViewer((current) => ({ ...current, i: Math.max(0, current.i - 1) }))}>‹</button>
+            onClick={() => openChatViewer(chatViewer.imgs, chatViewer.i - 1)}>‹</button>
           <button className="orderViewerArrow orderViewerArrowRight" disabled={chatViewer.i === chatViewer.imgs.length - 1}
-            onClick={() => setChatViewer((current) => ({ ...current, i: Math.min(current.imgs.length - 1, current.i + 1) }))}>›</button>
+            onClick={() => openChatViewer(chatViewer.imgs, chatViewer.i + 1)}>›</button>
         </>
       )}
     </div>
@@ -975,8 +1498,13 @@ const S = {
   },
 
   title: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    minWidth: 0,
     fontSize: 18,
-    fontWeight: 700,
+    fontWeight: 800,
+    color: "#ffcc00",
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis"
@@ -1056,6 +1584,46 @@ const S = {
     wordBreak: "break-word"
   },
 
+  orderTitleInside: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    minWidth: 0,
+    color: "#ffcc00",
+    fontSize: 18,
+    lineHeight: 1.2,
+    fontWeight: 800,
+    marginBottom: 6,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+  },
+
+  priorityInlineLabel: {
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    padding: "3px 7px",
+    borderRadius: 20,
+    background: "#ffd166",
+    color: "#171717",
+    fontSize: 10,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  },
+
+  reworkInlineLabel: {
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    padding: "3px 7px",
+    borderRadius: 20,
+    background: "#ffd166",
+    color: "#171717",
+    fontSize: 10,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  },
+
   orderImages: {
     display: "flex",
     gap: 10,
@@ -1085,6 +1653,170 @@ const S = {
     height: 56,
     borderRadius: 7,
     flexShrink: 0
+  },
+
+  orderUpdatePanel: {
+    marginTop: 10,
+    padding: 6,
+    background: "#181818",
+    border: "1px solid #333",
+    borderRadius: 12,
+  },
+
+  orderUpdateInput: {
+    display: "block",
+    width: "100%",
+    boxSizing: "border-box",
+    minHeight: 44,
+    padding: "10px 12px",
+    background: "#242424",
+    border: "1px solid #3b3b3b",
+    borderRadius: 9,
+    color: "#fff",
+    font: "inherit",
+    fontSize: 14,
+    lineHeight: 1.4,
+    resize: "vertical",
+    outline: "none",
+  },
+
+  orderUpdateInputOpen: {
+    borderColor: "#d0a646",
+    boxShadow: "0 0 0 2px rgba(208,166,70,.14)",
+  },
+
+  orderDraftImages: {
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
+    marginTop: 10,
+  },
+
+  orderDraftImageItem: {
+    position: "relative",
+  },
+
+  orderDraftImage: {
+    width: 72,
+    height: 72,
+    objectFit: "cover",
+    borderRadius: 8,
+    display: "block",
+    border: "1px solid #444",
+  },
+
+  orderDraftRemove: {
+    position: "absolute",
+    top: -7,
+    right: -7,
+    width: 22,
+    height: 22,
+    border: "1px solid #fff",
+    borderRadius: "50%",
+    background: "#c62828",
+    color: "#fff",
+    fontSize: 16,
+    lineHeight: "18px",
+    padding: 0,
+    cursor: "pointer",
+  },
+
+  orderUpdateTools: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 10,
+    flexWrap: "wrap",
+  },
+
+  orderAddImage: {
+    padding: "8px 10px",
+    border: "1px solid #444",
+    borderRadius: 8,
+    background: "#2a2a2a",
+    color: "#eee",
+    fontSize: 12,
+    cursor: "pointer",
+  },
+
+  orderUpdateActions: {
+    display: "flex",
+    gap: 8,
+    marginLeft: "auto",
+  },
+
+  orderCancelBtn: {
+    padding: "8px 12px",
+    border: "1px solid #444",
+    borderRadius: 8,
+    background: "#2a2a2a",
+    color: "#ddd",
+    cursor: "pointer",
+  },
+
+  orderSaveBtn: {
+    padding: "8px 14px",
+    border: "1px solid #d0a646",
+    borderRadius: 8,
+    background: "#d0a646",
+    color: "#171717",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+
+  orderUpdateError: {
+    marginTop: 8,
+    color: "#ffb4b4",
+    fontSize: 12,
+  },
+
+  historyBar: {
+    display: "flex",
+    justifyContent: "flex-end",
+    marginTop: 8,
+  },
+
+  historyButton: {
+    padding: "6px 10px",
+    border: "1px solid #3b3b3b",
+    borderRadius: 8,
+    background: "#1b1b1b",
+    color: "#bbb",
+    fontSize: 12,
+    cursor: "pointer",
+  },
+
+  historyPanel: {
+    marginTop: 6,
+    padding: 8,
+    border: "1px solid #333",
+    borderRadius: 10,
+    background: "#181818",
+    maxHeight: 220,
+    overflowY: "auto",
+  },
+
+  historyEmpty: {
+    color: "#888",
+    fontSize: 12,
+    padding: 6,
+    textAlign: "center",
+  },
+
+  historyRow: {
+    padding: "8px 4px",
+    borderBottom: "1px solid #2f2f2f",
+    color: "#ddd",
+    fontSize: 12,
+  },
+
+  historyRowTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 8,
+    color: "#f1c75b",
+    marginBottom: 3,
   },
 
   bubble: {

@@ -7,7 +7,21 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { getCurrentUser } from "../utils/auth";
 import { useLocation } from "react-router-dom";
-import { publishSyncEvent, putLocal } from "../utils/localSync";
+import {
+  deleteOrderDraft,
+  getAllOrderDrafts,
+  publishSyncEvent,
+  putLocal,
+  putOrderDraft,
+} from "../utils/localSync";
+
+function getStoragePath(row) {
+  if (row?.storage_path) return row.storage_path;
+  const marker = "/storage/v1/object/public/order-images/";
+  const url = String(row?.image_url || "");
+  const index = url.indexOf(marker);
+  return index < 0 ? null : decodeURIComponent(url.slice(index + marker.length).split("?")[0]);
+}
 
 // tạo id đơn giản
 
@@ -28,21 +42,108 @@ const [images, setImages] = useState([]);
 const [editingIndex, setEditingIndex] = useState(null);
 const textRef = useRef(null);
   const [mode, setMode] = useState("normal");
+  const [drafts, setDrafts] = useState([]);
+  const draftIdRef = useRef(`draft-${crypto.randomUUID()}`);
+  const draftStateRef = useRef({ customerName: "", text: "", mode: "normal", images: [] });
+  const saveDraftRef = useRef(null);
+  const submittingRef = useRef(false);
 useEffect(() => {
   if (editingOrder) {
     setMode(editingOrder.type || "normal");
 
-    setText(
-      editingOrder.title
-        ? editingOrder.title + "\n" + (editingOrder.content || editingOrder.text || "")
-        : editingOrder.content || editingOrder.text || ""
-    );
+    setText(editingOrder.content || editingOrder.text || "");
 
     setImages(editingOrder.images || []);
-    setCustomerName(editingOrder.customer_name || "");
+    setCustomerName(editingOrder.customer_name || editingOrder.title || "");
+  } else {
+    setText("");
+    setImages([]);
+    setCustomerName("");
+    setMode("normal");
   }
   requestAnimationFrame(() => textRef.current?.focus());
 }, [editingOrder]);
+
+useEffect(() => {
+  draftStateRef.current = { customerName, text, mode, images };
+}, [customerName, text, mode, images]);
+
+useEffect(() => {
+  submittingRef.current = submitting;
+}, [submitting]);
+
+useEffect(() => {
+  if (editingOrder) return undefined;
+  let active = true;
+  getAllOrderDrafts()
+    .then((rows) => {
+      if (!active) return;
+      setDrafts((rows || []).sort((a, b) => new Date(b.saved_at || 0) - new Date(a.saved_at || 0)));
+    })
+    .catch((error) => console.log("LOAD ORDER DRAFTS ERROR:", error));
+  return () => { active = false; };
+}, [editingOrder]);
+
+saveDraftRef.current = async () => {
+  if (editingOrder || submittingRef.current) return null;
+  const snapshot = draftStateRef.current;
+  if (!snapshot.customerName.trim() && !snapshot.text.trim() && snapshot.images.length === 0) return null;
+  const row = {
+    id: draftIdRef.current,
+    customer_name: snapshot.customerName,
+    content: snapshot.text,
+    mode: snapshot.mode,
+    images: snapshot.images,
+    saved_at: new Date().toISOString(),
+  };
+  try {
+    await putOrderDraft(row);
+    return row;
+  } catch (error) {
+    console.log("SAVE ORDER DRAFT ERROR:", error);
+    return null;
+  }
+};
+
+useEffect(() => () => {
+  void saveDraftRef.current?.();
+}, [editingOrder]);
+
+useEffect(() => {
+  if (editingOrder) return undefined;
+  const hasDraftContent = customerName.trim() || text.trim() || images.length > 0;
+  if (!hasDraftContent) return undefined;
+
+  const timer = window.setTimeout(async () => {
+    const savedDraft = await saveDraftRef.current?.();
+    if (!savedDraft) return;
+    setDrafts((current) => [
+      savedDraft,
+      ...current.filter((item) => item.id !== savedDraft.id),
+    ]);
+  }, 700);
+
+  return () => window.clearTimeout(timer);
+}, [customerName, text, mode, images, editingOrder]);
+
+async function saveDraftSnapshot() {
+  return saveDraftRef.current?.();
+}
+
+async function handleCancel() {
+  if (submitting) return;
+  await saveDraftSnapshot();
+  navigate("/");
+}
+
+function loadDraft(draft) {
+  draftIdRef.current = draft.id;
+  setCustomerName(draft.customer_name || "");
+  setText(draft.content || "");
+  setMode(draft.mode || "normal");
+  setImages(Array.isArray(draft.images) ? draft.images : []);
+  setEditingIndex(null);
+}
  // normal | system_task | system_message
 const handleFiles = (fileList, openEditor = false) => {
   const files = Array.from(fileList || []);
@@ -76,11 +177,24 @@ async function uploadOneImage(fileBase64, fileName) {
 }
 
 async function replaceOrderImages(orderId, imageList) {
+  const { data: oldRows } = await supabase
+    .from("order_images")
+    .select("id, image_url")
+    .eq("order_id", orderId);
+
   // xoá ảnh cũ trong bảng liên kết ảnh đơn
   await supabase
     .from("order_images")
     .delete()
     .eq("order_id", orderId);
+
+  const oldStoragePaths = (oldRows || []).map(getStoragePath).filter(Boolean);
+  if (oldStoragePaths.length > 0) {
+    const { error: storageError } = await supabase.storage
+      .from("order-images")
+      .remove(oldStoragePaths);
+    if (storageError) console.log("REMOVE OLD ORDER IMAGES ERROR:", storageError);
+  }
 
   const uploadedImages = await Promise.all(imageList.map((image, i) =>
     uploadOneImage(image, `${orderId}_${Date.now()}_${i}.png`)
@@ -108,13 +222,12 @@ async function replaceOrderImages(orderId, imageList) {
   }
 }
 
-  // tách title / body từ text
-  
   async function submit() {
   console.log("TEXT:", text);
   console.log("IMAGES:", images);
 
   if (submitting) return;   // ✅ chống bấm nhiều
+  submittingRef.current = true;
   setSubmitting(true);      // ✅ bắt đầu xử lý
 try {
 
@@ -126,15 +239,16 @@ try {
 // ✅ TRƯỜNG HỢP: ĐANG SỬA ĐƠN
 // =========================
 if (editingOrder) {
-  const lines = text.split("\n");
-  const title = lines[0] || "";
-  const content = lines.slice(1).join("\n");
+  const nextTitle = customerName.trim();
+  const content = text.trim();
+  const previousImageCount = (editingOrder.images || []).length;
+  const now = new Date().toISOString();
 
   // 1️⃣ Update order (reset về new)
   const { error: updateError } = await supabase
   .from("orders")
   .update({
-    title: title.trim(),
+    title: nextTitle,
     content: content.trim(),
     customer_name: customerName.trim() || null,
     status: "new",
@@ -143,6 +257,7 @@ if (editingOrder) {
     done_by_name: "",
     delivered_by_name: "",
     completed_by_name: "",
+    updated_at: now,
     required_users:
       editingOrder.type === "system_message"
         ? (await supabase.from("users").select("id")).data?.map(u => u.id).filter((userId) => userId !== me?.id) || []
@@ -157,7 +272,7 @@ if (editingOrder) {
   }
 const updatedOrder = {
   ...editingOrder,
-  title: title.trim(),
+  title: nextTitle,
   content: content.trim(),
   customer_name: customerName.trim() || null,
   status: "new",
@@ -166,26 +281,30 @@ const updatedOrder = {
   done_by_name: "",
   delivered_by_name: "",
   completed_by_name: "",
-  updated_at: new Date().toISOString(),
+  updated_at: now,
 };
 await putLocal("orders", updatedOrder);
 await publishSyncEvent({ entityType: "order", entityId: editingOrder.id, payload: updatedOrder });
 const beforeData = {
   title: editingOrder.title || "",
   content: editingOrder.content || editingOrder.text || "",
+  image_count: (editingOrder.images || []).length,
   type: editingOrder.type || "normal",
   status: editingOrder.status || "new",
 };
 
 const afterData = {
-  title: title.trim(),
+  title: nextTitle,
   content: content.trim(),
+  image_count: images.length,
+  added_images: Math.max(0, images.length - previousImageCount),
+  removed_images: Math.max(0, previousImageCount - images.length),
   customer_name: customerName.trim() || null,
   type: editingOrder.type || "normal",
   status: "new",
 };
 
-await supabase.from("order_edit_history").insert({
+const { error: historyError } = await supabase.from("order_edit_history").insert({
   order_id: editingOrder.id,
   editor_id: me?.id || null,
   editor_name: me?.name || me?.username || "Không rõ",
@@ -193,6 +312,7 @@ await supabase.from("order_edit_history").insert({
   before_data: beforeData,
   after_data: afterData,
 });
+if (historyError) console.log("SAVE ORDER HISTORY ERROR:", historyError);
 
  await replaceOrderImages(editingOrder.id, images);
 
@@ -200,10 +320,9 @@ await supabase.from("order_edit_history").insert({
   return;
 }
 
-  // dữ liệu từ ô nhập
-const lines = text.split("\n");
-const title = lines[0] || "";
-const content = lines.slice(1).join("\n");
+  // Tiêu đề và nội dung là hai trường riêng.
+const nextTitle = customerName.trim();
+const content = text.trim();
 
 const type = mode;
 
@@ -212,10 +331,11 @@ const { data: orderData, error: orderError } = await supabase
   .from("orders")
   .insert({
   type,
-  title: title.trim(),
+  title: nextTitle,
   content: content.trim(),
   customer_name: customerName.trim() || null,
   status: "new",
+  updated_at: new Date().toISOString(),
   needs_rework: false,
   pinned: type === "system_message",
   created_by: me?.id || null,
@@ -238,23 +358,28 @@ if (orderError) {
 
 const orderId = orderData.id;
 await putLocal("orders", orderData);
+try {
+  await deleteOrderDraft(draftIdRef.current);
+} catch (error) {
+  console.log("DELETE ORDER DRAFT ERROR:", error);
+}
 navigate("/", {
   replace: true,
   state: { createdOrder: orderData, focusOrderId: orderId, statusTab: "new" },
 });
-
 // Đưa đơn lên màn hình ngay; đồng bộ liên máy, tải ảnh và push tiếp tục chạy nền.
 void (async () => {
   await publishSyncEvent({ entityType: "order", entityId: orderId, payload: orderData });
   await replaceOrderImages(orderId, images);
   await notifyNewOrder({
     id: orderId,
-    title: title.trim(),
-    content: content.trim(),
+    title: nextTitle,
+    content: content,
   });
 })().catch((error) => console.log("CREATE ORDER BACKGROUND ERROR:", error));
 return;
 } finally {
+  submittingRef.current = false;
   setSubmitting(false);
 }
 
@@ -309,7 +434,7 @@ return;
       <textarea
   ref={textRef}
   style={S.textarea}
-  placeholder="Dòng đầu = tiêu đề, các dòng sau = nội dung"
+  placeholder="Nhập nội dung đơn"
   value={text}
   onChange={(e) => setText(e.target.value)}
 />
@@ -388,15 +513,47 @@ return;
 <div style={S.actions}>
         <button
   style={S.btnCancel}
-  onClick={() => !submitting && navigate("/")}
+  onClick={handleCancel}
   disabled={submitting}
 >
   Huỷ
 </button>
         <button style={S.btnOk} onClick={submit} disabled={submitting}>
   {submitting ? "Đang tạo..." : (editingOrder ? "Lưu sửa" : "Tạo đơn")}
-</button>
+        </button>
       </div>
+
+      {!editingOrder && (
+        <section style={S.draftPanel} aria-label="Các bản nháp">
+          <div style={S.draftHeading}>Bản tạm — chạm để mở lại</div>
+          {drafts.length === 0 && (
+            <div style={S.draftEmpty}>
+              Chưa có bản tạm. Đơn đang nhập sẽ tự lưu tại đây.
+            </div>
+          )}
+          {drafts.map((draft) => (
+            <div key={draft.id} style={S.draftRow}>
+              <button type="button" style={S.draftLoad} onClick={() => loadDraft(draft)}>
+                <strong>{draft.customer_name || (draft.content || "").split(/\r?\n/)[0] || "Đơn chưa đặt tên"}</strong>
+                <small>{new Date(draft.saved_at || 0).toLocaleString()}</small>
+                <small style={S.draftOpenHint}>Mở lại bản tạm</small>
+              </button>
+              <button
+                type="button"
+                style={S.draftDelete}
+                aria-label="Xoá bản tạm"
+                onClick={async (event) => {
+                  event.stopPropagation();
+                  await deleteOrderDraft(draft.id);
+                  setDrafts((current) => current.filter((item) => item.id !== draft.id));
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </section>
+      )}
     </div>
   );
 }
@@ -468,6 +625,57 @@ const S = {
   actions: {
     display: "flex",
     gap: 10
+  },
+  draftPanel: {
+    marginTop: 18,
+    padding: 12,
+    border: "1px solid #333",
+    borderRadius: 12,
+    background: "#191919",
+  },
+  draftHeading: {
+    color: "#ffcc00",
+    fontWeight: 700,
+    marginBottom: 8,
+  },
+  draftEmpty: {
+    padding: "10px 4px",
+    color: "#999",
+    fontSize: 13,
+  },
+  draftRow: {
+    display: "flex",
+    alignItems: "stretch",
+    gap: 6,
+    marginTop: 6,
+  },
+  draftLoad: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 3,
+    padding: "9px 10px",
+    border: "1px solid #3b3b3b",
+    borderRadius: 9,
+    background: "#242424",
+    color: "#fff",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  draftDelete: {
+    width: 38,
+    border: "1px solid #553333",
+    borderRadius: 9,
+    background: "#321d1d",
+    color: "#ff9b9b",
+    fontSize: 20,
+    cursor: "pointer",
+  },
+  draftOpenHint: {
+    color: "#69c5ff",
+    fontWeight: 700,
   },
   btnCancel: {
     flex: 1,

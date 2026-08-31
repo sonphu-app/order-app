@@ -2,8 +2,11 @@ import { supabase } from "../supabaseClient";
 import { getCurrentUser } from "./auth";
 
 const DB_NAME = "sonphu-local-data";
-const DB_VERSION = 1;
+const DB_VERSION = 3;
+const DRAFT_DB_NAME = "sonphu-order-drafts";
+const DRAFT_DB_VERSION = 1;
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
+const IMAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const STORE_BY_TYPE = {
   order: "orders",
@@ -12,9 +15,11 @@ const STORE_BY_TYPE = {
   order_message_image: "orderMessageImages",
   group_message: "groupMessages",
   group_message_image: "groupMessageImages",
+  order_edit_history: "orderEditHistory",
 };
 
 let dbPromise;
+let draftDbPromise;
 const objectUrls = new Map();
 const pendingImageCaches = new Map();
 
@@ -25,13 +30,22 @@ const LOCAL_STORE_NAMES = [
   "orderMessageImages",
   "groupMessages",
   "groupMessageImages",
+  "orderEditHistory",
+  "orderDrafts",
   "imageBlobs",
   "meta",
 ];
 
 function requestResult(request) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error);
   });
 }
@@ -54,7 +68,14 @@ export function openLocalDataDB() {
         if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id" });
       });
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error);
   });
   return dbPromise;
@@ -90,6 +111,56 @@ export async function deleteLocal(storeName, id) {
   await transactionDone(tx);
 }
 
+function openOrderDraftDB() {
+  if (draftDbPromise) return draftDbPromise;
+  draftDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(DRAFT_DB_NAME, DRAFT_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("drafts")) {
+        db.createObjectStore("drafts", { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        draftDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("Kho bản tạm đang bị khóa bởi một tab cũ"));
+  });
+  return draftDbPromise;
+}
+
+export async function putOrderDraft(value) {
+  if (!value?.id) return;
+  const db = await openOrderDraftDB();
+  const tx = db.transaction("drafts", "readwrite");
+  tx.objectStore("drafts").put(value);
+  await transactionDone(tx);
+}
+
+export async function getAllOrderDrafts() {
+  const db = await openOrderDraftDB();
+  const tx = db.transaction("drafts", "readonly");
+  return new Promise((resolve, reject) => {
+    const request = tx.objectStore("drafts").getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function deleteOrderDraft(id) {
+  if (!id) return;
+  const db = await openOrderDraftDB();
+  const tx = db.transaction("drafts", "readwrite");
+  tx.objectStore("drafts").delete(id);
+  await transactionDone(tx);
+}
+
 export async function clearLocalData() {
   const db = await openLocalDataDB();
   const availableStores = LOCAL_STORE_NAMES.filter((name) => db.objectStoreNames.contains(name));
@@ -116,7 +187,19 @@ async function cacheImageOnce(url) {
   const db = await openLocalDataDB();
   const readTx = db.transaction("imageBlobs", "readonly");
   const existing = await requestResult(readTx.objectStore("imageBlobs").get(url));
-  if (existing?.blob) return localImageUrl(url, existing.blob);
+  if (existing?.blob && Date.now() - new Date(existing.cached_at || 0).getTime() < IMAGE_CACHE_TTL_MS) {
+    return localImageUrl(url, existing.blob);
+  }
+  if (existing?.blob) {
+    const removeTx = db.transaction("imageBlobs", "readwrite");
+    removeTx.objectStore("imageBlobs").delete(url);
+    await transactionDone(removeTx);
+    const staleObjectUrl = objectUrls.get(url);
+    if (staleObjectUrl) {
+      URL.revokeObjectURL(staleObjectUrl);
+      objectUrls.delete(url);
+    }
+  }
 
   try {
     const response = await fetch(url);
@@ -159,7 +242,11 @@ export async function applySyncEvent(event) {
   }
 
   const payload = { ...(event.payload || {}), id: event.entity_id };
-  if (payload.image_url) payload.local_image_url = await cacheImage(payload.image_url);
+  // Keep remote image rows lightweight. Image bytes are cached by the image
+  // component only when it approaches the viewport.
+  if (payload.image_url && !String(payload.image_url).startsWith("data:")) {
+    delete payload.local_image_url;
+  }
   await putLocal(storeName, payload);
   return true;
 }

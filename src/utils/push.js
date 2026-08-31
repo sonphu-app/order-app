@@ -118,13 +118,8 @@ function trimText(s = "", max = 90) {
   return t.length > max ? t.slice(0, max - 1) + "…" : t;
 }
 
-function compactOrderLabel(order = {}) {
-  const parts = [order.title, order.content].filter(Boolean).map((x) => trimText(x, 40));
-  return parts.join(" | ") || "Đơn mới";
-}
-
 function orderNotificationLabel(order = {}) {
-  const title = trimText(order.title, 80);
+  const title = trimText(order.customer_name || order.title, 80);
   if (title) return title;
 
   const firstContentLine = String(order.content || "")
@@ -162,12 +157,15 @@ export async function notifyNewOrder(order) {
     return null;
   }
 
+  const senderName = me.name || me.username || "Không rõ";
+  const orderLabel = orderNotificationLabel(order);
+  const orderContent = trimText(order.content, 120);
   const payload = {
     type: "new_order",
     actorId: me.id,
-    actorName: me.name || me.username || "Không rõ",
-    title: `📦 Đơn mới - ${me.name || me.username || "Không rõ"}`,
-    body: compactOrderLabel(order),
+    actorName: senderName,
+    title: `📦 ${orderLabel} - ${senderName}`,
+    body: orderContent || "Đơn mới",
     url: `/order/${order.id}`,
     orderId: order.id,
   };

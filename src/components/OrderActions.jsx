@@ -30,6 +30,26 @@ export default function OrderActions({ order, onUpdated }) {
       return;
     }
 
+    const { error: historyError } = await supabase.from("order_edit_history").insert({
+      order_id: order.id,
+      editor_id: actorId || null,
+      editor_name: actorName,
+      action: "status",
+      before_data: {
+        status: order.status || "",
+        done_by_name: order.done_by_name || "",
+        delivered_by_name: order.delivered_by_name || "",
+        completed_by_name: order.completed_by_name || "",
+      },
+      after_data: {
+        status: data.status || timedUpdate.status || "",
+        done_by_name: data.done_by_name || timedUpdate.done_by_name || "",
+        delivered_by_name: data.delivered_by_name || timedUpdate.delivered_by_name || "",
+        completed_by_name: data.completed_by_name || timedUpdate.completed_by_name || "",
+      },
+    });
+    if (historyError) console.log("SAVE STATUS HISTORY ERROR:", historyError);
+
     onUpdated?.(data);
     await putLocal("orders", data);
     void publishSyncEvent({ entityType: "order", entityId: order.id, payload: data });
