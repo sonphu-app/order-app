@@ -123,6 +123,16 @@ function compactOrderLabel(order = {}) {
   return parts.join(" | ") || "Đơn mới";
 }
 
+function orderNotificationLabel(order = {}) {
+  const title = trimText(order.title, 80);
+  if (title) return title;
+
+  const firstContentLine = String(order.content || "")
+    .split(/\r?\n/)
+    .find((line) => line.trim());
+  return trimText(firstContentLine || "Đơn", 80) || "Đơn";
+}
+
 export async function sendPushEvent(payload) {
   console.log("sendPushEvent START =", payload);
 
@@ -171,20 +181,21 @@ export async function notifyOrderChat({ order, text, imageCount = 0 }) {
   const me = getCurrentUser();
   if (!me?.id || !order?.id) return;
 
+  const senderName = me.name || me.username || "Không rõ";
   let bodyText = "";
   if (text?.trim()) {
-    bodyText = `${trimText(order?.title || order?.content || "Đơn")} | ${trimText(text, 70)}`;
+    bodyText = trimText(text, 100);
   } else if (imageCount > 0) {
-    bodyText = `${trimText(order?.title || order?.content || "Đơn")} | Đã gửi ${imageCount} ảnh`;
+    bodyText = `Đã gửi ${imageCount} ảnh`;
   } else {
-    bodyText = `${trimText(order?.title || order?.content || "Đơn")} | Tin nhắn mới`;
+    bodyText = "Tin nhắn mới";
   }
 
   return sendPushEvent({
     type: "order_chat",
     actorId: me.id,
-    actorName: me.name || me.username || "Không rõ",
-    title: `💬 Chat đơn - ${me.name || me.username || "Không rõ"}`,
+    actorName: senderName,
+    title: `${orderNotificationLabel(order)} - ${senderName}`,
     body: bodyText,
     url: `/order/${order.id}`,
     orderId: order.id,

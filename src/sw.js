@@ -42,14 +42,16 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const targetUrl = event.notification?.data?.url || "/";
+  const targetUrl = new URL(
+    event.notification?.data?.url || "/",
+    self.registration.scope
+  ).href;
 
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if ("focus" in client) {
-          client.navigate(targetUrl);
-          return client.focus();
+          return client.navigate(targetUrl).then(() => client.focus());
         }
       }
       return self.clients.openWindow ? self.clients.openWindow(targetUrl) : undefined;
