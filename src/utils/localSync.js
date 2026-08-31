@@ -18,6 +18,17 @@ let dbPromise;
 const objectUrls = new Map();
 const pendingImageCaches = new Map();
 
+const LOCAL_STORE_NAMES = [
+  "orders",
+  "orderMessages",
+  "orderImages",
+  "orderMessageImages",
+  "groupMessages",
+  "groupMessageImages",
+  "imageBlobs",
+  "meta",
+];
+
 function requestResult(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -39,17 +50,7 @@ export function openLocalDataDB() {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
-      const stores = [
-        "orders",
-        "orderMessages",
-        "orderImages",
-        "orderMessageImages",
-        "groupMessages",
-        "groupMessageImages",
-        "imageBlobs",
-        "meta",
-      ];
-      stores.forEach((name) => {
+      LOCAL_STORE_NAMES.forEach((name) => {
         if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id" });
       });
     };
@@ -87,6 +88,18 @@ export async function deleteLocal(storeName, id) {
   const tx = db.transaction(storeName, "readwrite");
   tx.objectStore(storeName).delete(id);
   await transactionDone(tx);
+}
+
+export async function clearLocalData() {
+  const db = await openLocalDataDB();
+  const availableStores = LOCAL_STORE_NAMES.filter((name) => db.objectStoreNames.contains(name));
+  const tx = db.transaction(availableStores, "readwrite");
+  availableStores.forEach((name) => tx.objectStore(name).clear());
+  await transactionDone(tx);
+
+  objectUrls.forEach((url) => URL.revokeObjectURL(url));
+  objectUrls.clear();
+  pendingImageCaches.clear();
 }
 
 export async function cacheImage(url) {

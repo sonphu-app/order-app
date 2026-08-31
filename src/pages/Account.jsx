@@ -11,6 +11,7 @@ import {
   deleteUserById,
 } from "../utils/auth";
 import { resetAllData } from "../utils/resetSystem";
+import { clearLocalData } from "../utils/localSync";
 
 // helper
 
@@ -388,6 +389,22 @@ alert("Đã xóa tài khoản.");
     window.location.reload();
   };
 
+  const onClearThisDevice = async () => {
+    const accepted = confirm(
+      "Xóa các đơn, tin nhắn và ảnh đã lưu trên thiết bị này? Dữ liệu trên Supabase và tài khoản đăng nhập không bị xóa."
+    );
+    if (!accepted) return;
+
+    try {
+      await clearLocalData();
+      alert("Đã xóa dữ liệu cũ trên thiết bị này. App sẽ tải lại dữ liệu còn có trên Supabase.");
+      window.location.reload();
+    } catch (error) {
+      console.error("CLEAR LOCAL DATA ERROR:", error);
+      alert("Chưa xóa được dữ liệu trên thiết bị. Hãy đóng app, mở lại rồi thử lần nữa.");
+    }
+  };
+
   const openResetConfirm = () => {
     if (!canReset) return alert("Bạn không có quyền reset dữ liệu.");
     setResetConfirmText("");
@@ -614,8 +631,15 @@ alert("Đã xóa tài khoản.");
 
       {/* 6) Logout + Reset */}
       <div style={{ ...cardStyle(), marginTop: 12 }}>
-        <h3 style={{ marginTop: 0 }}>6) Đăng xuất</h3>
+        <h3 style={{ marginTop: 0 }}>6) Bộ nhớ thiết bị và đăng xuất</h3>
+        <div style={{ marginBottom: 12, color: "#555", fontSize: 13 }}>
+          Dùng nút này khi điện thoại còn hiện đơn, tin nhắn hoặc ảnh cũ. Nút chỉ dọn dữ liệu trên thiết bị đang dùng,
+          không xóa tài khoản và không xóa trực tiếp dữ liệu Supabase.
+        </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button type="button" onClick={onClearThisDevice} style={btnDangerMini()}>
+            Xóa dữ liệu cũ trên máy này
+          </button>
           <button type="button" onClick={onLogout} style={btnPrimary()}>
             Đăng xuất
           </button>
