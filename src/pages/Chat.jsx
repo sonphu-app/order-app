@@ -27,6 +27,7 @@ export default function Chat() {
   const [editingIndex, setEditingIndex] = useState(null);
   const [viewer, setViewer] = useState(null);
   const [viewerImageSrc, setViewerImageSrc] = useState("");
+  const [viewerZoom, setViewerZoom] = useState(1);
   const [groupUnreadCount, setGroupUnreadCount] = useState(0);
 
   const inputRef = useRef(null);
@@ -56,6 +57,7 @@ export default function Chat() {
       imageViewerHistoryRef.current = true;
     }
     showViewerImage(images, index);
+    setViewerZoom(1);
     setViewer({ images, index });
   }, [showViewerImage]);
 
@@ -64,6 +66,7 @@ export default function Chat() {
     imageViewerHistoryRef.current = false;
     setViewer(null);
     setViewerImageSrc("");
+    setViewerZoom(1);
     if (wasOpen) window.history.back();
   }, []);
 
@@ -71,6 +74,7 @@ export default function Chat() {
     if (!viewer) return;
     const nextIndex = Math.max(0, Math.min(viewer.images.length - 1, viewer.index + delta));
     showViewerImage(viewer.images, nextIndex);
+    setViewerZoom(1);
     setViewer({ ...viewer, index: nextIndex });
   }, [showViewerImage, viewer]);
 
@@ -616,6 +620,11 @@ export default function Chat() {
             src={viewerImageSrc || viewer.images[viewer.index]}
             className="viewerImg"
             alt=""
+            style={{ transform: `scale(${viewerZoom})` }}
+            onWheel={(event) => {
+              event.preventDefault();
+              setViewerZoom((current) => Math.min(4, Math.max(1, current + (event.deltaY < 0 ? 0.2 : -0.2))));
+            }}
             onTouchStart={(event) => {
               viewerTouchRef.current = event.touches[0]?.clientX ?? null;
             }}

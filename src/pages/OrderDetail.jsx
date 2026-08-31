@@ -53,6 +53,8 @@ const [images, setImages] = useState([]);
   // IMAGE VIEWER (AN TOÀN)
   const [viewerIndex, setViewerIndex] = useState(-1); // -1 = đóng
   const [viewerImageSrc, setViewerImageSrc] = useState("");
+  const [viewerZoom, setViewerZoom] = useState(1);
+  const [chatViewerZoom, setChatViewerZoom] = useState(1);
 
   const orderTopRef = useRef(null);
   const bottomRef = useRef(null);
@@ -71,6 +73,8 @@ function closeImageViewer() {
   setChatViewer(null);
   setViewerImageSrc("");
   setChatViewerImageSrc("");
+  setViewerZoom(1);
+  setChatViewerZoom(1);
   if (wasOpen) window.history.back();
 }
 
@@ -83,6 +87,7 @@ function openOrderViewer(index) {
   }
   setViewerIndex(index);
   setViewerImageSrc(source);
+  setViewerZoom(1);
 }
 
 function openChatViewer(imageList, index) {
@@ -94,6 +99,7 @@ function openChatViewer(imageList, index) {
   }
   setChatViewer({ imgs: imageList, i: index });
   setChatViewerImageSrc(source);
+  setChatViewerZoom(1);
 }
 
 const handleChatScroll = (e) => {
@@ -752,6 +758,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
       >
 
         {/* ===== ORDER CONTENT ===== */}
+        <div style={S.orderMessageRow}>
         <div
           ref={orderTopRef}
           style={{ ...S.orderBox, ...adaptiveOrderBoxStyle }}
@@ -788,6 +795,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 ))}
   </div>
 )}
+        </div>
         </div>
         <div style={S.historyBar}>
           <button
@@ -970,7 +978,11 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
       <img
         src={viewerImageSrc || order.images[viewerIndex]}
         alt=""
-        style={S.viewerImg}
+        style={{ ...S.viewerImg, transform: `scale(${viewerZoom})` }}
+        onWheel={(event) => {
+          event.preventDefault();
+          setViewerZoom((current) => Math.min(4, Math.max(1, current + (event.deltaY < 0 ? 0.2 : -0.2))));
+        }}
         onTouchStart={(event) => {
           viewerTouchRef.current = event.touches[0]?.clientX ?? null;
         }}
@@ -1046,7 +1058,11 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
       <img
         src={chatViewerImageSrc || chatViewer.imgs[chatViewer.i]}
         alt=""
-        style={S.viewerImg}
+        style={{ ...S.viewerImg, transform: `scale(${chatViewerZoom})` }}
+        onWheel={(event) => {
+          event.preventDefault();
+          setChatViewerZoom((current) => Math.min(4, Math.max(1, current + (event.deltaY < 0 ? 0.2 : -0.2))));
+        }}
         onTouchStart={(event) => {
           viewerTouchRef.current = event.touches[0]?.clientX ?? null;
         }}
@@ -1082,13 +1098,15 @@ const S = {
     background: "#f5efe3",
     color: "#3d2b1b",
     overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
     },
 
   header: {
-    position: "fixed",
+    position: "relative",
     top: 0,
-    left: 0,
-    right: 0,
+    width: "100%",
+    boxSizing: "border-box",
     background: "#fff7e6",
     padding: 12,
     borderBottom: "1px solid #d8b36a",
@@ -1125,33 +1143,35 @@ const S = {
 },
 
   body: {
-  position: "fixed",
-  top: 125,
-  bottom: 0,
-  left: 0,
-  right: 0,
-  marginTop: 0,
-  overflowY: "auto",
-  overflowX: "hidden",
-  padding: 14,
-  paddingBottom: 260,
-  boxSizing: "border-box"
+    position: "relative",
+    flex: 1,
+    minHeight: 0,
+    width: "100%",
+    overflowY: "auto",
+    overflowX: "hidden",
+    padding: 14,
+    paddingBottom: 260,
+    boxSizing: "border-box"
 },
 
   orderBox: {
+    maxWidth: "min(84%, 560px)",
+    boxSizing: "border-box",
     background: "#fffaf0",
-    border: "1px solid #d8b36a",
-    borderRadius: 12,
-    padding: 12,
-    scrollMarginTop: 170,
-    position: "sticky",
-    top: 0,
-    zIndex: 30,
-    boxShadow: "0 6px 18px rgba(91,55,22,.15)",
-    cursor: "default",
+    border: "1px solid #dec38d",
+    borderRadius: 16,
+    padding: "11px 14px",
+    scrollMarginTop: 20,
+    boxShadow: "0 2px 8px rgba(91,55,22,.1)",
     maxHeight: 900,
     overflow: "hidden",
     transition: "padding .12s ease, max-height .12s ease"
+  },
+
+  orderMessageRow: {
+    display: "flex",
+    justifyContent: "flex-start",
+    marginBottom: 12,
   },
 
   orderText: {
@@ -1212,7 +1232,7 @@ const S = {
     width: 120,
     height: 120,
     objectFit: "cover",
-    borderRadius: 8,
+    borderRadius: 12,
     cursor: "pointer",
     transition: "width .18s ease, height .18s ease"
   },
@@ -1226,7 +1246,7 @@ const S = {
   historyButton: {
     padding: "6px 10px",
     border: "1px solid #d1aa62",
-    borderRadius: 8,
+    borderRadius: 12,
     background: "#fffaf0",
     color: "#5f4a32",
     fontSize: 15,

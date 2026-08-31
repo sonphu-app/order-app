@@ -313,8 +313,13 @@ export default function ImageEditor({ src, onClose, onSave }) {
     rect.visible = false;
     canvas.discardActiveObject();
     canvas.renderAll();
+    // The editing canvas is intentionally fitted to the screen. Export the
+    // selected area back at the source image's resolution so the crop itself
+    // does not make the photo look soft or pixelated.
+    const sourceScale = Math.abs(Number(imageRef.current?.scaleX)) || 1;
+    const exportMultiplier = Math.min(8, Math.max(1, 1 / sourceScale));
     const cropped = canvas.toDataURL({
-      format: "jpeg", quality: 0.95,
+      format: "jpeg", quality: 1, multiplier: exportMultiplier,
       left: Math.max(0, bounds.left), top: Math.max(0, bounds.top),
       width: Math.min(canvas.width - bounds.left, bounds.width),
       height: Math.min(canvas.height - bounds.top, bounds.height),
@@ -362,7 +367,9 @@ export default function ImageEditor({ src, onClose, onSave }) {
     canvas.getObjects().filter((item) => item.isCropBox).forEach((item) => canvas.remove(item));
     canvas.discardActiveObject();
     canvas.renderAll();
-    const result = canvas.toDataURL({ format: "jpeg", quality: 0.95 });
+    const sourceScale = Math.abs(Number(imageRef.current?.scaleX)) || 1;
+    const exportMultiplier = Math.min(8, Math.max(1, 1 / sourceScale));
+    const result = canvas.toDataURL({ format: "jpeg", quality: 1, multiplier: exportMultiplier });
     if (window.history.state?.imageEditorMarker === historyMarkerRef.current) {
       pendingSaveRef.current = result;
       window.history.back();
