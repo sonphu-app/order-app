@@ -51,7 +51,17 @@ self.addEventListener("notificationclick", (event) => {
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if ("focus" in client) {
-          return client.navigate(targetUrl).then(() => client.focus());
+          return (async () => {
+            try {
+              await client.focus();
+              if (typeof client.navigate === "function") {
+                await client.navigate(targetUrl);
+              }
+              await client.focus();
+            } catch {
+              if (self.clients.openWindow) await self.clients.openWindow(targetUrl);
+            }
+          })();
         }
       }
       return self.clients.openWindow ? self.clients.openWindow(targetUrl) : undefined;
