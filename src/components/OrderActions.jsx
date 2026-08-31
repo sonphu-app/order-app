@@ -32,10 +32,20 @@ export default function OrderActions({ order, onUpdated }) {
 
     onUpdated?.(data);
     await putLocal("orders", data);
-    await publishSyncEvent({ entityType: "order", entityId: order.id, payload: data });
+    void publishSyncEvent({ entityType: "order", entityId: order.id, payload: data });
 
     if (goHome) {
-      navigate("/", { replace: true });
+      const statusTab = data.status === "new"
+        ? "new"
+        : data.status === "done"
+        ? "done"
+        : data.status === "delivered"
+        ? "delivered"
+        : "completed";
+      navigate("/", {
+        replace: true,
+        state: { focusOrderId: order.id, statusTab },
+      });
     }
   }
 
@@ -73,6 +83,7 @@ export default function OrderActions({ order, onUpdated }) {
         done_at: null,
         delivered_at: null,
         completed_at: null,
+        needs_rework: true,
         understood_by: [],
       },
       true
@@ -108,6 +119,7 @@ export default function OrderActions({ order, onUpdated }) {
     if (allUnderstood) {
       updateData.status = "done";
       updateData.done_by_name = actorName;
+      updateData.needs_rework = false;
     }
 
     await updateStatus(updateData, true);
@@ -132,6 +144,7 @@ export default function OrderActions({ order, onUpdated }) {
                     updateStatus({
                       status: "done",
                       done_by_name: actorName,
+                      needs_rework: false,
                     })
                   }
                 >
@@ -206,6 +219,7 @@ export default function OrderActions({ order, onUpdated }) {
                     updateStatus({
                       status: "done",
                       done_by_name: actorName,
+                      needs_rework: false,
                     })
                   }
                 >

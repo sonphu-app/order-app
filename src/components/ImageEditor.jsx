@@ -157,11 +157,14 @@ export default function ImageEditor({ src, onClose, onSave }) {
     fabric.Image.fromURL(src, (img) => {
       const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
       img.scale(scale);
-      img.set({ originX: "center", originY: "center", left: canvas.width / 2, top: canvas.height / 2 });
+      img.set({
+        originX: "center", originY: "center", left: canvas.width / 2, top: canvas.height / 2,
+        hasControls: false, hasBorders: false, lockScalingX: true, lockScalingY: true,
+      });
       imageRef.current = img;
       canvas.add(img);
       canvas.sendToBack(img);
-      canvas.setActiveObject(img);
+      canvas.discardActiveObject();
       canvas.renderAll();
       saveHistory();
     }, { crossOrigin: "anonymous" });
@@ -324,10 +327,13 @@ export default function ImageEditor({ src, onClose, onSave }) {
     fabric.Image.fromURL(cropped, (img) => {
       const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
       img.scale(scale);
-      img.set({ originX: "center", originY: "center", left: canvas.width / 2, top: canvas.height / 2 });
+      img.set({
+        originX: "center", originY: "center", left: canvas.width / 2, top: canvas.height / 2,
+        hasControls: false, hasBorders: false, lockScalingX: true, lockScalingY: true,
+      });
       imageRef.current = img;
       canvas.add(img);
-      canvas.setActiveObject(img);
+      canvas.discardActiveObject();
       canvas.renderAll();
       restoringRef.current = false;
       historyRef.current.push(JSON.stringify(canvas.toJSON()));

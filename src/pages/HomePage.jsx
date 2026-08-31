@@ -1,6 +1,6 @@
 import { syncPushHeartbeat } from "../utils/push";
 import { refreshCurrentUser } from "../utils/auth";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../supabaseClient";
 import { ensureWeeklySystemTask } from "../utils/systemTasks";
 import { useEffect, useMemo, useState, useRef } from "react";
@@ -77,16 +77,18 @@ const S = {
     minHeight: "100dvh",
     background: "#121212",
     padding: 14,
-    paddingBottom: 205,
+    paddingBottom: 176,
     color: "white",
   },
   section: { fontSize: 26, fontWeight: 800, margin: "20px 0 10px" },
   card: {
     borderRadius: 14,
     padding: 14,
-    marginBottom: 12,
+    marginBottom: 16,
     maxWidth: "100%",
     overflow: "hidden",
+    border: "1px solid #3b3b3b",
+    boxShadow: "0 5px 12px rgba(0,0,0,.3)",
   },
   systemHeader: {
     fontSize: 15,
@@ -108,40 +110,44 @@ const S = {
     position: "fixed",
     left: 0,
     right: 0,
-    bottom: 68,
+    bottom: "calc(56px + env(safe-area-inset-bottom))",
     zIndex: 19,
-    height: 58,
+    height: 50,
     display: "grid",
     gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
     background: "#161616",
     borderTop: "1px solid #343434",
-    padding: "6px",
+    padding: "4px 6px",
     gap: 4,
   },
   quickBar: {
     position: "fixed",
     left: 0,
     right: 0,
-    bottom: 126,
+    bottom: "calc(106px + env(safe-area-inset-bottom))",
     zIndex: 19,
-    height: 52,
+    minHeight: 48,
     display: "flex",
     gap: 8,
     alignItems: "center",
     background: "#161616",
     borderTop: "1px solid #343434",
-    padding: "7px 10px",
+    padding: "5px 10px",
     boxSizing: "border-box",
   },
   quickInput: {
     flex: 1,
     minWidth: 0,
-    height: 36,
+    minHeight: 36,
+    maxHeight: 64,
     borderRadius: 10,
     border: "1px solid #444",
     background: "#242424",
     color: "#fff",
-    padding: "0 11px",
+    padding: "8px 11px",
+    resize: "none",
+    lineHeight: 1.25,
+    fontFamily: "inherit",
   },
   quickButton: {
     height: 36,
@@ -158,7 +164,7 @@ const S = {
     borderRadius: 10,
     background: active ? "#f1f1f1" : "transparent",
     color: active ? "#111" : "#bcbcbc",
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: 750,
     display: "flex",
     alignItems: "center",
@@ -196,7 +202,7 @@ const S = {
 
 export default function Home() {
 const navigate = useNavigate();
-console.log("HOME REALTIME VERSION 1");
+const location = useLocation();
   const savedView = useMemo(() => readHomeView(), []);
   const [orders, setOrders] = useState(() => homeMemory.orders);
   const [q, setQ] = useState(() => savedView.q || "");
@@ -207,7 +213,10 @@ console.log("HOME REALTIME VERSION 1");
 const [users, setUsers] = useState([]);
 const [orderUnreadMap, setOrderUnreadMap] = useState(() => homeMemory.orderUnreadMap);
 const [groupUnreadCount, setGroupUnreadCount] = useState(() => homeMemory.groupUnreadCount);
+const [focusOrderId, setFocusOrderId] = useState(() => location.state?.focusOrderId || null);
 const restoredScrollRef = useRef(false);
+const handledNavigationRef = useRef(false);
+const realtimeReadyRef = useRef(false);
 
 useEffect(() => {
   homeMemory = { ...homeMemory, orders, orderUnreadMap, groupUnreadCount };
@@ -242,6 +251,23 @@ useEffect(() => () => {
   deliveredAt: row.delivered_at || null,
   completedAt: row.completed_at || null,
 });
+
+useEffect(() => {
+  if (handledNavigationRef.current || !location.state) return;
+  handledNavigationRef.current = true;
+  const incoming = location.state.createdOrder;
+  const nextTab = location.state.statusTab || "new";
+  setStatusTab(nextTab);
+  setQ("");
+  if (incoming?.id) {
+    const normalized = normalizeOrder(incoming);
+    setOrders((current) => [normalized, ...current.filter((item) => item.id !== normalized.id)]);
+    setFocusOrderId(incoming.id);
+  } else if (location.state.focusOrderId) {
+    setFocusOrderId(location.state.focusOrderId);
+  }
+  navigate("/", { replace: true, state: null });
+}, [location.state, navigate]);
 const loadUsersSupabase = async () => {
   const { data, error } = await supabase
     .from("users")
@@ -416,20 +442,59 @@ useEffect(() => {
         loadGroupUnreadCount();
       }
     )
-    .subscribe();
+    .subscribe((status) => {
+      realtimeReadyRef.current = status === "SUBSCRIBED";
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        console.log("HOME REALTIME:", status);
+      }
+    });
 
   return () => {
+    realtimeReadyRef.current = false;
     supabase.removeChannel(channel);
   };
 }, []);
 useEffect(() => {
   const refreshFromLocal = async (event) => {
-    if (event.detail?.entity_type !== "order") return;
-    const cached = await getAllLocal("orders");
-    setOrders(cached.map(normalizeOrder));
+    const type = event.detail?.entity_type;
+    if (type === "order" || type === "order_image") {
+      const cached = await getAllLocal("orders");
+      setOrders(cached.map(normalizeOrder));
+    }
+    if (type === "order_message") loadOrderUnreadCounts();
+    if (type === "group_message") loadGroupUnreadCount();
   };
   window.addEventListener("sonphu-local-sync", refreshFromLocal);
   return () => window.removeEventListener("sonphu-local-sync", refreshFromLocal);
+}, []);
+
+// Dự phòng cho thiết bị iOS hoặc mạng chặn websocket Realtime.
+useEffect(() => {
+  let polling = false;
+  const refresh = async (force = false) => {
+    if (polling || (!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
+    polling = true;
+    try {
+      const { data, error } = await supabase
+        .from("orders")
+        .select("*")
+        .order("updated_at", { ascending: false });
+      if (!error && data) {
+        await putManyLocal("orders", data);
+        setOrders(data.map(normalizeOrder));
+      }
+      await Promise.all([loadOrderUnreadCounts(), loadGroupUnreadCount()]);
+    } finally {
+      polling = false;
+    }
+  };
+  const onFocus = () => refresh(true);
+  const timer = window.setInterval(refresh, 15000);
+  window.addEventListener("focus", onFocus);
+  return () => {
+    clearInterval(timer);
+    window.removeEventListener("focus", onFocus);
+  };
 }, []);
   // ===== LỌC THEO THỜI GIAN =====
 const today = new Date();
@@ -503,8 +568,11 @@ if (filter && typeof filter === "object" && filter.type === "custom") {
 }
 
   // ===== LỌC THEO TÌM KIẾM =====
-  const finalFiltered = timeFiltered.filter((o) => {
-    const text = (o.title || "") + " " + (o.content || "") + " " + (o.phone || "");
+  const searchSource = q.trim() ? orders : timeFiltered;
+  const finalFiltered = searchSource.filter((o) => {
+    const text = [o.title, o.content, o.phone, o.customer_name, o.createdByName]
+      .filter(Boolean)
+      .join(" ");
     return text.toLowerCase().includes(q.toLowerCase());
   });
 
@@ -545,6 +613,7 @@ const updateOrder = async (id, action) => {
   if (action === "reset") {
     updateData = {
       status: "new",
+      needs_rework: true,
       done_by_name: "",
       delivered_by_name: "",
       completed_by_name: "",
@@ -558,6 +627,7 @@ const updateOrder = async (id, action) => {
   if (action === "done") {
     updateData = {
       status: "done",
+      needs_rework: false,
       done_by_name: actorName,
       done_at: now,
       updated_at: now,
@@ -609,6 +679,7 @@ const updateOrder = async (id, action) => {
       updateData.status = "done";
       updateData.done_by_name = actorName;
       updateData.done_at = now;
+      updateData.needs_rework = false;
     }
   }
 
@@ -617,13 +688,28 @@ const updateOrder = async (id, action) => {
     .update(updateData)
     .eq("id", id);
 
-  if (error) console.log("UPDATE ERROR:", error);
+  if (error) {
+    console.log("UPDATE ERROR:", error);
+    return;
+  }
 
   const nextOrder = { ...current, ...updateData };
   await putLocal("orders", nextOrder);
-  await publishSyncEvent({ entityType: "order", entityId: id, payload: nextOrder });
+  setOrders((currentOrders) => currentOrders.map((item) => item.id === id ? normalizeOrder(nextOrder) : item));
+  void publishSyncEvent({ entityType: "order", entityId: id, payload: nextOrder });
 
-  await loadOrdersSupabase();
+  const nextTab = action === "reset"
+    ? "new"
+    : action === "done" || (action === "ack" && updateData.status === "done")
+    ? "done"
+    : action === "shipped" && updateData.status !== "completed"
+    ? "delivered"
+    : action === "completed" || updateData.status === "completed"
+    ? "completed"
+    : statusTab;
+  setQ("");
+  setStatusTab(nextTab);
+  setFocusOrderId(id);
 };
 
   // sort ghim lên đầu
@@ -660,7 +746,15 @@ const updateOrder = async (id, action) => {
 
     return (
       <div
-        style={{ ...S.card, background: getCardColor(o) }}
+        id={`order-${o.id}`}
+        style={{
+          ...S.card,
+          background: getCardColor(o),
+          ...(focusOrderId === o.id ? {
+            border: "2px solid #2ecc71",
+            boxShadow: "0 0 0 3px rgba(46,204,113,.18), 0 6px 14px rgba(0,0,0,.35)",
+          } : {}),
+        }}
         onClick={() => navigate(`/order/${o.id}`)}
       >
         <div style={{ ...S.cardContent, position: "relative" }}>
@@ -699,6 +793,12 @@ const updateOrder = async (id, action) => {
           {o.customer_name && (
             <div style={{ color: "#f1c75b", fontWeight: 800, fontSize: 15 }}>
               👤 {o.customer_name}
+            </div>
+          )}
+
+          {o.needs_rework && (
+            <div style={{ color: "#ffcf5a", fontWeight: 900, fontSize: 13 }}>
+              🔁 CẦN LÀM LẠI
             </div>
           )}
 
@@ -811,15 +911,18 @@ const getMetaText = (o, section) => {
 };
 
 const createQuickOrder = async () => {
-  const title = quickText.trim();
+  const lines = quickText.trim().split("\n");
+  const title = (lines.shift() || "").trim();
+  const content = lines.join("\n").trim();
   if (!title || quickSubmitting || !hasPermission(PERMISSIONS.CREATE_ORDER)) return;
   setQuickSubmitting(true);
   const me = getCurrentUser() || {};
   const { data, error } = await supabase.from("orders").insert({
     type: "normal",
     title,
-    content: "",
+    content,
     status: "new",
+    needs_rework: false,
     pinned: false,
     created_by: me.id || null,
     created_by_name: me.name || me.username || "Không rõ",
@@ -834,10 +937,11 @@ const createQuickOrder = async () => {
   }
   setQuickText("");
   await putLocal("orders", data);
-  await publishSyncEvent({ entityType: "order", entityId: data.id, payload: data });
   setOrders((current) => [normalizeOrder(data), ...current.filter((item) => item.id !== data.id)]);
   setStatusTab("new");
-  void notifyNewOrder({ id: data.id, title, content: "" });
+  setFocusOrderId(data.id);
+  void publishSyncEvent({ entityType: "order", entityId: data.id, payload: data });
+  void notifyNewOrder({ id: data.id, title, content });
 };
 
 const unreadIn = (list) => list.reduce(
@@ -855,12 +959,31 @@ const statusTabs = [
   { key: "completed", label: "Hoàn thành", count: completedOrders.length, unread: unreadIn(completedOrders) },
 ];
 
-const visibleOrders = sorted.filter((o) => {
+const visibleOrders = q.trim() ? sorted : sorted.filter((o) => {
   if (statusTab === "new") return o.status === "new";
   if (statusTab === "done") return showInDone(o);
   if (statusTab === "delivered") return showInDelivered(o);
   return showInCompleted(o);
 });
+
+useEffect(() => {
+  if (!focusOrderId || !visibleOrders.some((item) => item.id === focusOrderId)) return;
+  const timer = setTimeout(() => {
+    document.getElementById(`order-${focusOrderId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, 80);
+  const clearTimer = setTimeout(() => setFocusOrderId(null), 3500);
+  return () => {
+    clearTimeout(timer);
+    clearTimeout(clearTimer);
+  };
+}, [focusOrderId, visibleOrders]);
+
+const sectionForOrder = (orderItem) => {
+  if (orderItem.status === "new") return "new";
+  if (orderItem.status === "done") return "done";
+  if (orderItem.status === "delivered") return "delivered";
+  return "completed";
+};
 
   return (
     <div style={S.app}>
@@ -876,11 +999,13 @@ const visibleOrders = sorted.filter((o) => {
       <Header searchValue={q} onSearchChange={setQ} />
       <FilterBar value={filter} onChange={setFilter} />
 
-      <div style={S.section}>{statusTabs.find((tab) => tab.key === statusTab)?.label}</div>
-      {visibleOrders.map((o) => (
-        <Card key={o.id} o={o} metaText={getMetaText(o, statusTab)}>
+      <div style={S.section}>{q.trim() ? "Kết quả tìm kiếm" : statusTabs.find((tab) => tab.key === statusTab)?.label}</div>
+      {visibleOrders.map((o) => {
+        const cardSection = q.trim() ? sectionForOrder(o) : statusTab;
+        return (
+        <Card key={o.id} o={o} metaText={getMetaText(o, cardSection)}>
           <>
-            {statusTab === "new" && o.type === "system_message" && (
+            {cardSection === "new" && o.type === "system_message" && (
               <>
                 {hasPermission(PERMISSIONS.MARK_DONE) && o.created_by !== getCurrentUser()?.id && (
                   <Btn onClick={() => updateOrder(o.id, "ack")}>👁 Đã hiểu</Btn>
@@ -896,11 +1021,11 @@ const visibleOrders = sorted.filter((o) => {
               </>
             )}
 
-            {statusTab === "new" && o.type === "system_task" && (
+            {cardSection === "new" && o.type === "system_task" && (
               <Btn onClick={() => updateOrder(o.id, "done")}>✓ Đã xong</Btn>
             )}
 
-            {statusTab === "new" && isNormal(o) && (
+            {cardSection === "new" && isNormal(o) && (
               <>
                 {hasPermission(PERMISSIONS.EDIT_ORDER) && (
                   <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
@@ -913,7 +1038,7 @@ const visibleOrders = sorted.filter((o) => {
               </>
             )}
 
-            {statusTab === "done" && isNormal(o) && (
+            {cardSection === "done" && isNormal(o) && (
               <>
                 {hasPermission(PERMISSIONS.MARK_DELIVERED) && (
                   <Btn onClick={() => updateOrder(o.id, "shipped")}>🚚 Giao</Btn>
@@ -924,39 +1049,41 @@ const visibleOrders = sorted.filter((o) => {
               </>
             )}
 
-            {statusTab === "done" && isSystem(o) && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+            {cardSection === "done" && isSystem(o) && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
               <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
             )}
 
-            {statusTab === "delivered" && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
+            {cardSection === "delivered" && hasPermission(PERMISSIONS.COMPLETE_ORDER) && (
               <Btn onClick={() => updateOrder(o.id, "completed")}>🏁 Hoàn thành</Btn>
             )}
 
-            {(statusTab === "done" || statusTab === "delivered") &&
+            {(cardSection === "done" || cardSection === "delivered") &&
               !(o.status === "completed" && o.deliveredByName) &&
               hasPermission(PERMISSIONS.EDIT_ORDER) && (
-                <Btn onClick={() => updateOrder(o.id, "reset")}>↩ Đưa lên</Btn>
+                <Btn onClick={() => updateOrder(o.id, "reset")}>↩ Làm lại</Btn>
               )}
           </>
         </Card>
-      ))}
+      );})}
 
       {visibleOrders.length === 0 && (
         <div style={{ color: "#888", textAlign: "center", padding: "36px 12px" }}>Chưa có đơn trong mục này.</div>
       )}
 
       {hasPermission(PERMISSIONS.CREATE_ORDER) && (
-        <form style={S.quickBar} onSubmit={(event) => { event.preventDefault(); createQuickOrder(); }}>
-          <input
+        <div style={S.quickBar}>
+          <textarea
             style={S.quickInput}
+            rows={1}
+            enterKeyHint="enter"
             value={quickText}
             onChange={(event) => setQuickText(event.target.value)}
             placeholder="Nhập nhanh một đơn mới..."
           />
-          <button type="submit" style={S.quickButton} disabled={quickSubmitting || !quickText.trim()}>
+          <button type="button" onClick={createQuickOrder} style={S.quickButton} disabled={quickSubmitting || !quickText.trim()}>
             {quickSubmitting ? "..." : "Tạo"}
           </button>
-        </form>
+        </div>
       )}
 
       <div style={S.statusBar}>

@@ -86,16 +86,17 @@ export default function FilterBar({ value, onChange }) {
 const styles = {
   wrap: {
     display: "flex",
-    gap: 8,
+    gap: 6,
     marginBottom: 10,
     overflowX: "auto",
+    scrollbarWidth: "none",
   },
 
   btn: {
     background: "#333",
     color: "white",
     border: "none",
-    padding: "6px 12px",
+    padding: "6px 8px",
     borderRadius: 8,
     cursor: "pointer",
     whiteSpace: "nowrap",

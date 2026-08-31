@@ -221,7 +221,7 @@ export async function pullSyncEvents(onApplied) {
   return data || [];
 }
 
-export function subscribeSyncEvents(onApplied) {
+export function subscribeSyncEvents(onApplied, onStatus) {
   const channel = supabase
     .channel(`local-sync-${crypto.randomUUID()}`)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "sync_events" }, async ({ new: event }) => {
@@ -233,7 +233,7 @@ export function subscribeSyncEvents(onApplied) {
         await onApplied?.(event);
       }
     })
-    .subscribe();
+    .subscribe((status) => onStatus?.(status));
   return () => supabase.removeChannel(channel);
 }
 

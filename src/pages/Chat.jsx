@@ -28,6 +28,7 @@ export default function Chat() {
   const msgListRef = useRef(null);
   const reloadTimerRef = useRef(null);
   const viewerTouchRef = useRef(null);
+  const realtimeReadyRef = useRef(false);
   const navigate = useNavigate();
 
   const me = getCurrentUser();
@@ -88,12 +89,25 @@ export default function Chat() {
         .from("group_message_images")
         .select("*")
         .in("message_id", ids);
+      const cachedById = new Map(localImages.map((row) => [String(row.id), row]));
+      imgs = (imgData || []).map((row) => ({
+        ...row,
+        local_image_url: cachedById.get(String(row.id))?.local_image_url,
+      }));
+      await putManyLocal("groupMessageImages", imgs);
 
-      imgs = await Promise.all((imgData || []).map(async (row) => ({
+      void Promise.all(imgs.map(async (row) => ({
         ...row,
         local_image_url: await cacheImage(row.image_url),
-      })));
-      await putManyLocal("groupMessageImages", imgs);
+      }))).then(async (cachedRows) => {
+        await putManyLocal("groupMessageImages", cachedRows);
+        setMessages((current) => current.map((message) => ({
+          ...message,
+          images: cachedRows
+            .filter((image) => String(image.message_id) === String(message.id))
+            .map((image) => image.local_image_url || image.image_url),
+        })));
+      });
     }
 
     const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
@@ -194,16 +208,34 @@ export default function Chat() {
         }
       )
       .subscribe((status) => {
+        realtimeReadyRef.current = status === "SUBSCRIBED";
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           console.log("GROUP CHAT REALTIME:", status);
         }
       });
 
     return () => {
+      realtimeReadyRef.current = false;
       clearTimeout(reloadTimerRef.current);
       supabase.removeChannel(channel);
     };
   }, [loadChat, loadUnread, scrollToBottom]);
+
+  // iOS và mạng yếu: giữ một nhịp đồng bộ dự phòng nếu kênh Realtime bị ngắt.
+  useEffect(() => {
+    const refresh = (force = false) => {
+      if ((!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
+      loadChat();
+      loadUnread();
+    };
+    const onFocus = () => refresh(true);
+    const timer = window.setInterval(refresh, 12000);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [loadChat, loadUnread]);
 
   useEffect(() => {
     const refreshFromLocal = (event) => {
@@ -218,6 +250,21 @@ export default function Chat() {
   useEffect(() => {
     scrollToBottom(false);
   }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!viewer) return undefined;
+    const onKey = (event) => {
+      if (event.key === "Escape") setViewer(null);
+      if (event.key === "ArrowLeft") {
+        setViewer((current) => current ? { ...current, index: Math.max(0, current.index - 1) } : current);
+      }
+      if (event.key === "ArrowRight") {
+        setViewer((current) => current ? { ...current, index: Math.min(current.images.length - 1, current.index + 1) } : current);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewer]);
 
   // ===== MARK SEEN =====
   useEffect(() => {
@@ -352,7 +399,8 @@ export default function Chat() {
   }
 
   const handleKeyDown = async (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    const isDesktop = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    if (isDesktop && e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       await send();
     }
@@ -540,6 +588,22 @@ export default function Chat() {
               }));
             }}
           />
+          {viewer.images.length > 1 && (
+            <>
+              <button
+                type="button"
+                className="viewerArrow viewerArrowLeft"
+                disabled={viewer.index === 0}
+                onClick={() => setViewer((current) => ({ ...current, index: Math.max(0, current.index - 1) }))}
+              >‹</button>
+              <button
+                type="button"
+                className="viewerArrow viewerArrowRight"
+                disabled={viewer.index === viewer.images.length - 1}
+                onClick={() => setViewer((current) => ({ ...current, index: Math.min(current.images.length - 1, current.index + 1) }))}
+              >›</button>
+            </>
+          )}
           {viewer.images.length > 1 && <div className="viewerCounter">{viewer.index + 1}/{viewer.images.length} • Vuốt để xem</div>}
         </div>
       )}

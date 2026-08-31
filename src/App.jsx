@@ -21,8 +21,33 @@ export default function App() {
   useEffect(() => {
     if (!user?.id) return undefined;
     const notify = (event) => window.dispatchEvent(new CustomEvent("sonphu-local-sync", { detail: event }));
-    pullSyncEvents(notify);
-    return subscribeSyncEvents(notify);
+    let syncing = false;
+    let realtimeReady = false;
+    const syncNow = async () => {
+      if (syncing || document.visibilityState === "hidden") return;
+      syncing = true;
+      try {
+        await pullSyncEvents(notify);
+      } finally {
+        syncing = false;
+      }
+    };
+    syncNow();
+    const stopRealtime = subscribeSyncEvents(notify, (status) => {
+      realtimeReady = status === "SUBSCRIBED";
+    });
+    const timer = window.setInterval(() => {
+      if (!realtimeReady) syncNow();
+    }, 15000);
+    const onVisible = () => document.visibilityState === "visible" && syncNow();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", syncNow);
+    return () => {
+      stopRealtime();
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", syncNow);
+    };
   }, [user?.id]);
 
   // cho Login gọi để refresh sau khi đăng nhập

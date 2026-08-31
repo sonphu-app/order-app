@@ -138,6 +138,7 @@ if (editingOrder) {
     content: content.trim(),
     customer_name: customerName.trim() || null,
     status: "new",
+    needs_rework: false,
     has_image: images.length > 0,
     done_by_name: "",
     delivered_by_name: "",
@@ -160,6 +161,7 @@ const updatedOrder = {
   content: content.trim(),
   customer_name: customerName.trim() || null,
   status: "new",
+  needs_rework: false,
   has_image: images.length > 0,
   done_by_name: "",
   delivered_by_name: "",
@@ -214,6 +216,7 @@ const { data: orderData, error: orderError } = await supabase
   content: content.trim(),
   customer_name: customerName.trim() || null,
   status: "new",
+  needs_rework: false,
   pinned: type === "system_message",
   created_by: me?.id || null,
 created_by_name: me?.name || me?.username || "Không rõ",
@@ -235,16 +238,22 @@ if (orderError) {
 
 const orderId = orderData.id;
 await putLocal("orders", orderData);
-await publishSyncEvent({ entityType: "order", entityId: orderId, payload: orderData });
-await replaceOrderImages(orderId, images);
-console.log("🔥 CALL PUSH");
-await notifyNewOrder({
-  id: orderId,
-  title: title.trim(),
-  content: content.trim(),
+navigate("/", {
+  replace: true,
+  state: { createdOrder: orderData, focusOrderId: orderId, statusTab: "new" },
 });
 
-navigate("/");
+// Đưa đơn lên màn hình ngay; đồng bộ liên máy, tải ảnh và push tiếp tục chạy nền.
+void (async () => {
+  await publishSyncEvent({ entityType: "order", entityId: orderId, payload: orderData });
+  await replaceOrderImages(orderId, images);
+  await notifyNewOrder({
+    id: orderId,
+    title: title.trim(),
+    content: content.trim(),
+  });
+})().catch((error) => console.log("CREATE ORDER BACKGROUND ERROR:", error));
+return;
 } finally {
   setSubmitting(false);
 }

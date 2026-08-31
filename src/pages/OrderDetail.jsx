@@ -21,7 +21,9 @@ const [users, setUsers] = useState([]);
 
 const getName = (id) => {
   const u = users.find(x => x.id === id);
-  return u ? u.name : id;
+  if (u) return u.name || u.username || "Nhân viên";
+  if (id === me?.id) return me.name || me.username || "Bạn";
+  return "Nhân viên";
 };
   const { id } = useParams();
   const navigate = useNavigate();
@@ -33,6 +35,7 @@ const lastChatScrollRef = useRef(0);
 const ignoreAutoResizeUntilRef = useRef(0);
 const bodyRef = useRef(null);
 const inputRef = useRef(null);
+const realtimeReadyRef = useRef(false);
 const [images, setImages] = useState([]);
 
   // CHAT
@@ -102,6 +105,12 @@ const loadOrder = async ({ remote = true } = {}) => {
     if (!localOrder) return;
   }
   if (data) await putLocal("orders", data);
+  if (data) {
+    setOrder({
+      ...data,
+      images: localImages.map((item) => item.local_image_url || item.image_url),
+    });
+  }
 
   // 2. lấy ảnh của order
   const { data: orderImgs, error: imgErr } = await supabase
@@ -115,16 +124,25 @@ const loadOrder = async ({ remote = true } = {}) => {
   }
 
   // 3. gộp lại
-  const cachedRemoteImages = await Promise.all((orderImgs || []).map(async (row) => ({
+  const localImageById = new Map(localImages.map((row) => [String(row.id), row]));
+  const remoteImages = (orderImgs || []).map((row) => ({
     ...row,
-    local_image_url: await cacheImage(row.image_url),
-  })));
-  await putManyLocal("orderImages", cachedRemoteImages);
+    local_image_url: localImageById.get(String(row.id))?.local_image_url,
+  }));
+  await putManyLocal("orderImages", remoteImages);
   const imageMap = new Map(localImages.map((row) => [String(row.id), row]));
-  cachedRemoteImages.forEach((row) => imageMap.set(String(row.id), row));
+  remoteImages.forEach((row) => imageMap.set(String(row.id), row));
   setOrder({
     ...(data || localOrder),
     images: [...imageMap.values()].map((row) => row.local_image_url || row.image_url),
+  });
+
+  void Promise.all(remoteImages.map(async (row) => ({
+    ...row,
+    local_image_url: await cacheImage(row.image_url),
+  }))).then(async (cachedRows) => {
+    await putManyLocal("orderImages", cachedRows);
+    await loadOrder({ remote: false });
   });
 };
 
@@ -176,16 +194,43 @@ useEffect(() => {
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "order_images", filter: `order_id=eq.${id}` },
-      () => loadOrder({ remote: false })
+      async (payload) => {
+        if (payload.eventType === "DELETE") {
+          await deleteLocal("orderImages", payload.old.id);
+        } else {
+          const row = {
+            ...payload.new,
+            local_image_url: await cacheImage(payload.new.image_url),
+          };
+          await putLocal("orderImages", row);
+        }
+        loadOrder({ remote: false });
+      }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "order_message_images" },
-      () => loadChat({ remote: false })
+      async (payload) => {
+        if (payload.eventType === "DELETE") await deleteLocal("orderMessageImages", payload.old.id);
+        else {
+          const row = {
+            ...payload.new,
+            local_image_url: await cacheImage(payload.new.image_url),
+          };
+          await putLocal("orderMessageImages", row);
+        }
+        loadChat({ remote: false });
+      }
     )
-    .subscribe();
+    .subscribe((status) => {
+      realtimeReadyRef.current = status === "SUBSCRIBED";
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        console.log("ORDER REALTIME:", status);
+      }
+    });
 
   return () => {
+    realtimeReadyRef.current = false;
     supabase.removeChannel(channel);
   };
 }, [id]);
@@ -198,6 +243,45 @@ useEffect(() => {
   window.addEventListener("sonphu-local-sync", refreshFromLocal);
   return () => window.removeEventListener("sonphu-local-sync", refreshFromLocal);
 }, [id]);
+
+useEffect(() => {
+  const refresh = (force = false) => {
+    if ((!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
+    loadOrder();
+    loadChat();
+  };
+  const onFocus = () => refresh(true);
+  const timer = window.setInterval(refresh, 12000);
+  window.addEventListener("focus", onFocus);
+  return () => {
+    clearInterval(timer);
+    window.removeEventListener("focus", onFocus);
+  };
+}, [id]);
+
+useEffect(() => {
+  if (viewerIndex < 0 && !chatViewer) return undefined;
+  const onKey = (event) => {
+    if (event.key === "Escape") {
+      setViewerIndex(-1);
+      setChatViewer(null);
+    }
+    if (viewerIndex >= 0 && event.key === "ArrowLeft") {
+      setViewerIndex((current) => Math.max(0, current - 1));
+    }
+    if (viewerIndex >= 0 && event.key === "ArrowRight") {
+      setViewerIndex((current) => Math.min((order?.images?.length || 1) - 1, current + 1));
+    }
+    if (chatViewer && event.key === "ArrowLeft") {
+      setChatViewer((current) => current ? { ...current, i: Math.max(0, current.i - 1) } : current);
+    }
+    if (chatViewer && event.key === "ArrowRight") {
+      setChatViewer((current) => current ? { ...current, i: Math.min(current.imgs.length - 1, current.i + 1) } : current);
+    }
+  };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+}, [viewerIndex, chatViewer, order?.images?.length]);
 
   /* ================= LOAD CHAT ================= */
 const loadChat = async ({ remote = true } = {}) => {
@@ -240,11 +324,20 @@ const loadChat = async ({ remote = true } = {}) => {
     if (imgErr) {
       console.log("LOAD IMG ERROR:", imgErr);
     } else {
-      imgs = await Promise.all((imgRows || []).map(async (row) => ({
+      const cachedById = new Map(localMessageImages.map((row) => [String(row.id), row]));
+      imgs = (imgRows || []).map((row) => ({
+        ...row,
+        local_image_url: cachedById.get(String(row.id))?.local_image_url,
+      }));
+      await putManyLocal("orderMessageImages", imgs);
+
+      void Promise.all(imgs.map(async (row) => ({
         ...row,
         local_image_url: await cacheImage(row.image_url),
-      })));
-      await putManyLocal("orderMessageImages", imgs);
+      }))).then(async (cachedRows) => {
+        await putManyLocal("orderMessageImages", cachedRows);
+        await loadChat({ remote: false });
+      });
     }
   }
 
@@ -429,7 +522,8 @@ void notifyOrderChat({
 }
 
   function handleKey(e) {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    const isDesktop = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    if (isDesktop && e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
@@ -512,6 +606,17 @@ void notifyOrderChat({
   /* ================= RENDER ================= */
   return (
     <div style={S.page}>
+      <style>{`
+        .orderViewerArrow {
+          position: absolute; top: 50%; transform: translateY(-50%);
+          width: 48px; height: 64px; border: 0; border-radius: 12px;
+          background: rgba(0,0,0,.6); color: #fff; font-size: 42px; cursor: pointer;
+        }
+        .orderViewerArrow:disabled { opacity: .25; cursor: default; }
+        .orderViewerArrowLeft { left: 18px; }
+        .orderViewerArrowRight { right: 18px; }
+        @media (hover: none), (pointer: coarse) { .orderViewerArrow { display: none; } }
+      `}</style>
 
       {/* ===== HEADER ===== */}
       <div style={S.header}>
@@ -710,29 +815,6 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
       <button type="button" style={S.sendBtn} onClick={sendMessage}>
   ➤
 </button>
-      <button
-        style={S.nlBtn}
-        onClick={() => {
-          const el = inputRef.current;
-          if (!el) return;
-          const start = el.selectionStart;
-          const end = el.selectionEnd;
-
-          const newText =
-            text.substring(0, start) +
-            "\n" +
-            text.substring(end);
-
-          setText(newText);
-
-          setTimeout(() => {
-            el.focus();
-            el.selectionStart = el.selectionEnd = start + 1;
-          }, 0);
-        }}
-      >
-        ↵
-      </button>
     </div>
   </div>
 
@@ -773,6 +855,14 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         }}
       />
       <div style={S.viewerCounter}>{viewerIndex + 1}/{order.images.length} • Vuốt để xem</div>
+      {order.images.length > 1 && (
+        <>
+          <button className="orderViewerArrow orderViewerArrowLeft" disabled={viewerIndex === 0}
+            onClick={() => setViewerIndex((current) => Math.max(0, current - 1))}>‹</button>
+          <button className="orderViewerArrow orderViewerArrowRight" disabled={viewerIndex === order.images.length - 1}
+            onClick={() => setViewerIndex((current) => Math.min(order.images.length - 1, current + 1))}>›</button>
+        </>
+      )}
     </div>
   </div>
 )}
@@ -843,6 +933,14 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         }}
       />
       <div style={S.viewerCounter}>{chatViewer.i + 1}/{chatViewer.imgs.length} • Vuốt để xem</div>
+      {chatViewer.imgs.length > 1 && (
+        <>
+          <button className="orderViewerArrow orderViewerArrowLeft" disabled={chatViewer.i === 0}
+            onClick={() => setChatViewer((current) => ({ ...current, i: Math.max(0, current.i - 1) }))}>‹</button>
+          <button className="orderViewerArrow orderViewerArrowRight" disabled={chatViewer.i === chatViewer.imgs.length - 1}
+            onClick={() => setChatViewer((current) => ({ ...current, i: Math.min(current.imgs.length - 1, current.i + 1) }))}>›</button>
+        </>
+      )}
     </div>
   </div>
 )}

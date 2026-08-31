@@ -99,12 +99,13 @@ const s = {
     right: 0,
     width: "100%",
     zIndex: 20,
-    height: 68,
+    height: "calc(56px + env(safe-area-inset-bottom))",
     background: "#1a1a1a",
     borderTop: "1px solid #2c2c2c",
     display: "flex",
     alignItems: "center",
-    padding: "0 10px"
+    padding: "0 8px env(safe-area-inset-bottom)",
+    boxSizing: "border-box",
   },
 
   mainGroup: {
@@ -122,7 +123,7 @@ const s = {
 
   itemActive: { color: "#fff" },
 
-  text: { marginTop: 4 },
+  text: { marginTop: 1 },
 
   logBox: {
     width: 40,
