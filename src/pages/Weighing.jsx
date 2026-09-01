@@ -219,17 +219,21 @@ export default function Weighing() {
   useEffect(() => {
     let active = true;
 
-    Promise.all([updateScaleState({ open: true }), getWeighings()])
-      .then(([state, savedRows]) => {
+    Promise.allSettled([updateScaleState({ open: true }), getWeighings()])
+      .then(([stateResult, rowsResult]) => {
         if (!active) return;
-        setLanConnected(true);
-        setHeadConnected(Boolean(state.headConnected));
-        setSerialMessage(state.serialMessage || "Chờ dữ liệu từ đầu cân");
-        setScaleOpen(Boolean(state.open));
-        setWeightLocked(Boolean(state.locked));
-        setLiveWeight(Number(state.weight) || 0);
-        setLockedWeight(Number(state.lockedWeight) || 0);
-        const normalizedRows = savedRows.map(normalizeWeighing);
+        if (stateResult.status === "fulfilled") {
+          const state = stateResult.value;
+          setLanConnected(true);
+          setHeadConnected(Boolean(state.headConnected));
+          setSerialMessage(state.serialMessage || "Chờ dữ liệu từ đầu cân");
+          setScaleOpen(Boolean(state.open));
+          setWeightLocked(Boolean(state.locked));
+          setLiveWeight(Number(state.weight) || 0);
+          setLockedWeight(Number(state.lockedWeight) || 0);
+        }
+        if (rowsResult.status !== "fulfilled") return;
+        const normalizedRows = rowsResult.value.map(normalizeWeighing);
         setRows(normalizedRows);
         setSelectedId(normalizedRows.at(0)?.id ?? null);
         if (normalizedRows.at(0)) {
@@ -496,7 +500,7 @@ export default function Weighing() {
   };
 
   const persistCurrentWeighing = async (overrides = {}) => {
-    if (!lanConnected || saving || !selectedId) return;
+    if (saving || !selectedId) return;
     const charge = overrides.charge ?? totalCharge;
     const paid = overrides.paid ?? Math.max(0, Math.round(Number(paidInput) || 0));
     setSaving(true);
@@ -571,7 +575,7 @@ export default function Weighing() {
   };
 
   const toggleCancelled = async (row) => {
-    if (!lanConnected || saving) return;
+    if (saving) return;
     const cancelled = !row.cancelled;
     setSaving(true);
     try {
@@ -587,7 +591,7 @@ export default function Weighing() {
   };
 
   const toggleRowPaid = async (row, checked) => {
-    if (!lanConnected || saving || row.cancelled) return;
+    if (saving || row.cancelled) return;
     const charge = Math.max(0, Number(row.charge ?? row.weigher) || 0);
     const paid = checked ? charge : 0;
     setSaving(true);
@@ -867,7 +871,7 @@ export default function Weighing() {
                       aria-label={`Đã thanh toán ${row.plate || row.id}`}
                       title="Tích để đánh dấu đã thanh toán đủ"
                       checked={Number(row.charge ?? row.weigher) > 0 && Number(row.paid ?? row.driver) >= Number(row.charge ?? row.weigher)}
-                      disabled={!lanConnected || saving || row.cancelled || Number(row.charge ?? row.weigher) <= 0}
+                      disabled={saving || row.cancelled || Number(row.charge ?? row.weigher) <= 0}
                       onClick={(event) => event.stopPropagation()}
                       onChange={(event) => void toggleRowPaid(row, event.target.checked)}
                     />

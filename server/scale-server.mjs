@@ -14,6 +14,10 @@ const defaultDataDir = process.platform === "win32" && existsSync("D:\\")
 const dataDir = resolve(process.env.SCALE_DATA_DIR || defaultDataDir);
 const host = process.env.SCALE_HOST || "0.0.0.0";
 const port = Number(process.env.SCALE_PORT || 8787);
+const supabaseUrl = String(process.env.SCALE_SUPABASE_URL || "https://xjcfauhswufiizkuggqx.supabase.co").trim().replace(/\/$/, "");
+const supabaseAnonKey = String(process.env.SCALE_SUPABASE_ANON_KEY || "sb_publishable_y5VTtVkL45InUQ29hOQfzQ_BYk_NZaE").trim();
+const syncMachineId = String(process.env.SCALE_MACHINE_ID || "scale-head-192-168-1-12").trim();
+const syncEnabled = process.env.SCALE_SYNC_ENABLED !== "false" && Boolean(supabaseUrl && supabaseAnonKey);
 
 mkdirSync(dataDir, { recursive: true });
 
@@ -50,6 +54,18 @@ ensureColumn("cancelled", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("cancelled_at", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("series_id", "TEXT NOT NULL DEFAULT ''");
 
+database.exec(`
+  CREATE TABLE IF NOT EXISTS scale_sync_queue (
+    source_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    queued_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_scale_sync_queue_next_attempt
+    ON scale_sync_queue (next_attempt_at);
+`);
+
 const listWeighings = database.prepare(`
   SELECT id, plate, plate_note AS plateNote, customer, direction, goods, weigher, driver,
          charge, paid, no_charge AS noCharge, cancelled, cancelled_at AS cancelledAt,
@@ -60,6 +76,130 @@ const listWeighings = database.prepare(`
   ORDER BY id DESC
   LIMIT 1000
 `);
+const listAllWeighings = database.prepare(`
+  SELECT id, plate, plate_note AS plateNote, customer, direction, goods, weigher, driver,
+         charge, paid, no_charge AS noCharge, cancelled, cancelled_at AS cancelledAt,
+         series_id AS seriesId,
+         gross, tare, net, gross_at AS grossAt, tare_at AS tareAt,
+         created_at AS createdAt, updated_at AS updatedAt
+  FROM weighings
+  ORDER BY id DESC
+`);
+const getWeighing = database.prepare(`
+  SELECT id, plate, plate_note AS plateNote, customer, direction, goods, weigher, driver,
+         charge, paid, no_charge AS noCharge, cancelled, cancelled_at AS cancelledAt,
+         series_id AS seriesId,
+         gross, tare, net, gross_at AS grossAt, tare_at AS tareAt,
+         created_at AS createdAt, updated_at AS updatedAt
+  FROM weighings WHERE id = ?
+`);
+const withSourceId = (row) => ({
+  ...row,
+  sourceId: `${syncMachineId}:${row.id}`,
+});
+const listWeighingRows = () => listWeighings.all().map(withSourceId);
+
+const queueSyncRecord = database.prepare(`
+  INSERT INTO scale_sync_queue (source_id, payload, attempts, next_attempt_at, queued_at)
+  VALUES (?, ?, 0, ?, ?)
+  ON CONFLICT(source_id) DO UPDATE SET
+    payload = excluded.payload,
+    attempts = 0,
+    next_attempt_at = excluded.next_attempt_at,
+    queued_at = excluded.queued_at
+`);
+const listPendingSync = database.prepare(`
+  SELECT source_id AS sourceId, payload, attempts
+  FROM scale_sync_queue
+  WHERE next_attempt_at <= ?
+  ORDER BY queued_at ASC
+  LIMIT 25
+`);
+const deleteSyncedRecord = database.prepare("DELETE FROM scale_sync_queue WHERE source_id = ?");
+const retrySyncRecord = database.prepare("UPDATE scale_sync_queue SET attempts = ?, next_attempt_at = ? WHERE source_id = ?");
+const countPendingSync = database.prepare("SELECT COUNT(*) AS count FROM scale_sync_queue");
+
+const validTimestamp = (value, fallback = new Date().toISOString()) => {
+  const text = String(value || "").trim();
+  return text && !Number.isNaN(new Date(text).getTime()) ? text : fallback;
+};
+const nullableTimestamp = (value) => {
+  const text = String(value || "").trim();
+  return text && !Number.isNaN(new Date(text).getTime()) ? text : null;
+};
+const toRemoteWeighing = (row) => ({
+  source_id: row.sourceId || `${syncMachineId}:${row.id}`,
+  machine_id: syncMachineId,
+  local_id: Number(row.id) || null,
+  series_id: String(row.seriesId || ""),
+  plate: String(row.plate || ""),
+  plate_note: String(row.plateNote || ""),
+  customer: String(row.customer || ""),
+  direction: String(row.direction || ""),
+  goods: String(row.goods || ""),
+  gross: Number(row.gross) || 0,
+  tare: Number(row.tare) || 0,
+  net: Number(row.net) || 0,
+  gross_at: nullableTimestamp(row.grossAt),
+  tare_at: nullableTimestamp(row.tareAt),
+  charge: Number(row.charge ?? row.weigher) || 0,
+  paid: Number(row.paid ?? row.driver) || 0,
+  no_charge: Boolean(row.noCharge),
+  cancelled: Boolean(row.cancelled),
+  cancelled_at: nullableTimestamp(row.cancelledAt),
+  source_created_at: validTimestamp(row.createdAt),
+  source_updated_at: validTimestamp(row.updatedAt),
+});
+
+let syncInProgress = false;
+const enqueueSync = (row) => {
+  if (!syncEnabled || !row?.id) return;
+  const now = new Date().toISOString();
+  const sourceId = row.sourceId || `${syncMachineId}:${row.id}`;
+  queueSyncRecord.run(sourceId, JSON.stringify(toRemoteWeighing({ ...row, sourceId })), now, now);
+  void flushSyncQueue();
+};
+
+async function pushSyncPayload(payload) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${supabaseUrl}/rest/v1/scale_weighings?on_conflict=source_id`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${supabaseAnonKey}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(`Supabase trả về HTTP ${response.status}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function flushSyncQueue() {
+  if (!syncEnabled || syncInProgress) return;
+  syncInProgress = true;
+  try {
+    const pending = listPendingSync.all(new Date().toISOString());
+    for (const item of pending) {
+      try {
+        await pushSyncPayload(JSON.parse(item.payload));
+        deleteSyncedRecord.run(item.sourceId);
+      } catch {
+        const attempts = Number(item.attempts || 0) + 1;
+        const delayMs = Math.min(15 * 60 * 1000, 5000 * (2 ** Math.min(attempts, 7)));
+        retrySyncRecord.run(attempts, new Date(Date.now() + delayMs).toISOString(), item.sourceId);
+      }
+    }
+  } finally {
+    syncInProgress = false;
+  }
+}
 
 const insertWeighing = database.prepare(`
   INSERT INTO weighings (
@@ -181,10 +321,16 @@ function saveRecord(input) {
   const requestedId = toInteger(input.id);
   if (requestedId > 0) {
     const result = updateWeighing.run(...values, now, requestedId);
-    if (result.changes > 0) return listWeighings.all().find((row) => row.id === requestedId);
+    if (result.changes > 0) {
+      const saved = getWeighing.get(requestedId);
+      enqueueSync(saved);
+      return saved;
+    }
   }
   const result = insertWeighing.run(...values, now, now);
-  return listWeighings.all().find((row) => row.id === Number(result.lastInsertRowid));
+  const saved = getWeighing.get(Number(result.lastInsertRowid));
+  enqueueSync(saved);
+  return saved;
 }
 
 const mimeTypes = {
@@ -223,7 +369,13 @@ const server = http.createServer(async (request, response) => {
 
   try {
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return json(response, 200, { ok: true, storage: "local-sqlite", dataDir, ...publicState() });
+      return json(response, 200, {
+        ok: true,
+        storage: "local-sqlite",
+        sync: { enabled: syncEnabled, pending: Number(countPendingSync.get().count || 0), machineId: syncMachineId },
+        dataDir,
+        ...publicState(),
+      });
     }
     if (request.method === "GET" && url.pathname === "/api/scale/state") {
       return json(response, 200, publicState());
@@ -244,7 +396,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/weighings") {
-      return json(response, 200, listWeighings.all());
+      return json(response, 200, listWeighingRows());
     }
     if (request.method === "POST" && url.pathname === "/api/weighings") {
       const record = saveRecord(await readJson(request));
@@ -260,6 +412,12 @@ const server = http.createServer(async (request, response) => {
 const heartbeat = setInterval(() => {
   for (const response of eventClients) response.write(": keep-alive\n\n");
 }, 20_000);
+const syncInterval = setInterval(() => void flushSyncQueue(), 15_000);
+
+if (syncEnabled) {
+  for (const row of listAllWeighings.all().map(withSourceId)) enqueueSync(row);
+  setTimeout(() => void flushSyncQueue(), 0);
+}
 
 server.listen(port, host, () => {
   console.log(`Máy chủ cân đang chạy tại http://${host}:${port}`);
@@ -269,6 +427,7 @@ server.listen(port, host, () => {
 
 async function shutdown() {
   clearInterval(heartbeat);
+  clearInterval(syncInterval);
   await stopSerial();
   server.close(() => {
     database.close();
