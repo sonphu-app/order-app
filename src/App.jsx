@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { getCurrentUser } from "./utils/auth";
 import { pullSyncEvents, subscribeSyncEvents } from "./utils/localSync";
 import { hasPermission, PERMISSIONS } from "./utils/permissions";
+import { initAppUpdate } from "./utils/appUpdate";
 
 const Home = lazy(() => import("./pages/HomePage"));
 const CreateOrder = lazy(() => import("./pages/CreateOrder"));
@@ -19,6 +20,10 @@ function Allowed({ permission, children }) {
 export default function App() {
   const [user, setUser] = useState(getCurrentUser());
   const isStandaloneScale = window.location.pathname === "/scale";
+
+  useEffect(() => {
+    initAppUpdate();
+  }, []);
 
   useEffect(() => {
     if (isStandaloneScale || !user?.id) return undefined;

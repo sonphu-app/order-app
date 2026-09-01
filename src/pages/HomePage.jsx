@@ -11,6 +11,7 @@ import { hasPermission, PERMISSIONS } from "../utils/permissions";
 import { getCurrentUser } from "../utils/auth";
 import { deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } from "../utils/localSync";
 import { notifyNewOrder } from "../utils/push";
+import { applyAppUpdate, isAppUpdateAvailable } from "../utils/appUpdate";
 function formatTime(date) {
   const d = new Date(date);
   const hh = String(d.getHours()).padStart(2, "0");
@@ -45,6 +46,7 @@ function saveHomeView(next) {
 }
 
 const defaultFilterForStatus = (status) => status === "completed" ? "today" : "all";
+const APP_UPDATE_TASK_ID = "system-app-update";
 // Thẻ dùng một màu trung tính; trạng thái đã được tách thành từng tab riêng.
 const getCardColor = () => "#fffaf0";
 // 🔘 BUTTON
@@ -276,19 +278,26 @@ const navigate = useNavigate();
 const location = useLocation();
   const savedView = useMemo(() => readHomeView(), []);
   const [orders, setOrders] = useState(() => homeMemory.orders);
+  const [appUpdateAvailable, setAppUpdateAvailable] = useState(isAppUpdateAvailable);
   const [q, setQ] = useState(() => savedView.q || "");
   const [quickText, setQuickText] = useState("");
   const [quickSubmitting, setQuickSubmitting] = useState(false);
   const quickInputRef = useRef(null);
   const [statusTab, setStatusTab] = useState(() => savedView.statusTab || "new");
   const [filter, setFilter] = useState(() => defaultFilterForStatus(savedView.statusTab || "new"));
-const [users, setUsers] = useState([]);
+  const [users, setUsers] = useState([]);
 const [orderUnreadMap, setOrderUnreadMap] = useState(() => homeMemory.orderUnreadMap);
 const [groupUnreadCount, setGroupUnreadCount] = useState(() => homeMemory.groupUnreadCount);
 const [focusOrderId, setFocusOrderId] = useState(() => location.state?.focusOrderId || null);
 const restoredScrollRef = useRef(false);
 const handledNavigationRef = useRef(false);
   const realtimeReadyRef = useRef(false);
+
+  useEffect(() => {
+    const showUpdateTask = () => setAppUpdateAvailable(true);
+    window.addEventListener("sonphu-app-update", showUpdateTask);
+    return () => window.removeEventListener("sonphu-app-update", showUpdateTask);
+  }, []);
 
   useEffect(() => {
     const input = quickInputRef.current;
@@ -651,7 +660,20 @@ yesterday.setDate(today.getDate() - 1);
 const sevenDaysAgo = new Date(today);
 sevenDaysAgo.setDate(today.getDate() - 7);
 
-let timeFiltered = orders;
+const updateTask = appUpdateAvailable ? {
+  id: APP_UPDATE_TASK_ID,
+  type: "system_task",
+  title: "CẬP NHẬT ỨNG DỤNG",
+  content: "Có bản cập nhật mới cho app nội bộ. Bấm Cập nhật ngay để dùng phiên bản mới.",
+  status: "new",
+  pinned: true,
+  createdAt: new Date().toISOString(),
+  lastActionAt: new Date().toISOString(),
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+} : null;
+const displayOrders = updateTask ? [updateTask, ...orders] : orders;
+let timeFiltered = displayOrders;
 
 // Mỗi mục lọc theo đúng thời điểm của trạng thái đó.
 const safeFilterTime = (o) => {
@@ -667,21 +689,21 @@ const safeFilterTime = (o) => {
 
 // BẤM "HÔM NAY": chỉ đúng hôm nay
 if (filter === "today") {
-  timeFiltered = orders.filter((o) => {
+    timeFiltered = displayOrders.filter((o) => {
     const t = safeFilterTime(o);
     return t >= today;
   });
 }
 
 if (filter === "yesterday") {
-  timeFiltered = orders.filter((o) => {
+  timeFiltered = displayOrders.filter((o) => {
     const t = safeFilterTime(o);
     return t >= yesterday && t < today;
   });
 }
 
 if (filter === "7days") {
-  timeFiltered = orders.filter((o) => {
+  timeFiltered = displayOrders.filter((o) => {
     const t = safeFilterTime(o);
     return t >= sevenDaysAgo;
   });
@@ -700,7 +722,7 @@ if (filter && typeof filter === "object" && filter.type === "custom") {
 }
 
   // ===== LỌC THEO TÌM KIẾM =====
-  const searchSource = q.trim() ? orders : timeFiltered;
+  const searchSource = q.trim() ? displayOrders : timeFiltered;
   const finalFiltered = searchSource.filter((o) => {
     const text = [o.title, o.content, o.phone, o.customer_name, o.createdByName]
       .filter(Boolean)
@@ -733,6 +755,10 @@ const togglePin = async (id) => {
 
 // ✅ UPDATE ORDER STATUS
 const updateOrder = async (id, action) => {
+  if (id === APP_UPDATE_TASK_ID && action === "apply-update") {
+    await applyAppUpdate();
+    return;
+  }
   const current = orders.find((o) => o.id === id);
   if (!current) return;
 
@@ -1272,7 +1298,11 @@ const sectionForOrder = (orderItem) => {
               </>
             )}
 
-            {cardSection === "new" && o.type === "system_task" && (
+            {cardSection === "new" && o.id === APP_UPDATE_TASK_ID && (
+              <Btn onClick={() => updateOrder(o.id, "apply-update")}>↻ Cập nhật ngay</Btn>
+            )}
+
+            {cardSection === "new" && o.type === "system_task" && o.id !== APP_UPDATE_TASK_ID && (
               <Btn onClick={() => updateOrder(o.id, "done")}>✓ Đã xong</Btn>
             )}
 
