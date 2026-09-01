@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  getScaleState,
   getWeighings,
   saveWeighing,
   subscribeToScale,
@@ -271,9 +272,32 @@ export default function Weighing() {
       if (active) setLanConnected(connected);
     });
 
+    let polling = false;
+    const pollScaleState = async () => {
+      if (!active || polling) return;
+      polling = true;
+      try {
+        const state = await getScaleState();
+        if (!active) return;
+        setLanConnected(true);
+        setHeadConnected(Boolean(state.headConnected));
+        setSerialMessage(state.serialMessage || "Chờ dữ liệu từ đầu cân");
+        setScaleOpen(Boolean(state.open));
+        setWeightLocked(Boolean(state.locked));
+        setLiveWeight(Number(state.weight) || 0);
+        setLockedWeight(Number(state.lockedWeight) || 0);
+      } catch {
+        if (active) setLanConnected(false);
+      } finally {
+        polling = false;
+      }
+    };
+    const pollTimer = window.setInterval(pollScaleState, 5_000);
+
     return () => {
       active = false;
       unsubscribe();
+      window.clearInterval(pollTimer);
     };
   }, []);
 
