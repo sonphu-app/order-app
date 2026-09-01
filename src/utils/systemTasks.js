@@ -24,6 +24,22 @@ function getWeekKey(now = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
+function getThisWeekWednesday1130(now = new Date()) {
+  const d = new Date(now);
+  const day = d.getDay();
+  d.setDate(d.getDate() + (3 - day));
+  d.setHours(11, 30, 0, 0);
+  return d;
+}
+
+function getTrashWeekKey(now = new Date()) {
+  const wed = getThisWeekWednesday1130(now);
+  const y = wed.getFullYear();
+  const m = String(wed.getMonth() + 1).padStart(2, "0");
+  const d = String(wed.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 // ✅ tạo 1 order hệ thống dạng "nhiệm vụ"
 export function makeSystemTaskOrder(text, createdAt = new Date(), extra = {}) {
   return {
@@ -63,57 +79,71 @@ export function makeSystemMessageOrder(text, requiredUsers = [], createdAt = new
   };
 }
 
-// ✅ tự tạo nhiệm vụ "KIỂM TRA CÂN ĐIỆN TỬ" lúc 7h Thứ 3
-export async function ensureWeeklySystemTask(rows = []) {
-  const now = new Date();
-
-  // chỉ thứ 3 lúc 7:00
-  if (!shouldCreateWeeklyTask(now)) return null;
-
-  // key theo tuần (giữ logic cũ của bạn)
-  const weekKey = getWeekKey(now);
-
-  // nếu Home đã load rows từ DB thì check ngay trên rows cho nhanh
+async function ensureOneWeeklyTask(rows, task) {
   const existsLocal = Array.isArray(rows) && rows.some(
-    (o) =>
-      o.type === "system_task" &&
-      o.kind === "weekly-scale-check" &&
-      o.system_key === weekKey
+    (o) => o.type === "system_task" && o.kind === task.kind && o.system_key === task.key
   );
-  if (existsLocal) return null;
+  if (existsLocal) return false;
 
-  // check DB để chắc chắn không tạo trùng (phòng nhiều máy)
   const { data: existing, error: findErr } = await supabase
     .from("orders")
     .select("id")
     .eq("type", "system_task")
-    .eq("kind", "weekly-scale-check")
-    .eq("system_key", weekKey)
+    .eq("kind", task.kind)
+    .eq("system_key", task.key)
     .limit(1);
 
-if (findErr) {
-  console.log("ensureWeeklySystemTask find error:", findErr);
-  return null;
-}
+  if (findErr) {
+    console.log("ensureWeeklySystemTask find error:", findErr);
+    return false;
+  }
+  if (existing?.length) return false;
 
-if (existing && existing.length > 0) return null;const nowIso = new Date().toISOString();
+  const nowIso = new Date().toISOString();
   const { error: insErr } = await supabase.from("orders").insert({
     type: "system_task",
-    title: "KIỂM TRA CÂN ĐIỆN TỬ",
-    content: "",
+    title: task.title,
+    content: task.content,
     status: "new",
     pinned: false,
     has_image: false,
     understood_by: [],
-    // 2 field này bạn chưa ghi trong schema, nhưng Home/systemTasks đang dùng.
-    // Nếu DB chưa có thì BỎ 2 dòng dưới (xem ghi chú ngay dưới)
-    system_key: weekKey,
-    kind: "weekly-scale-check",
-created_at: nowIso,
-updated_at: nowIso,
+    system_key: task.key,
+    kind: task.kind,
+    created_at: nowIso,
+    updated_at: nowIso,
   });
 
-  if (insErr) console.log("ensureWeeklySystemTask insert error:", insErr);
-
+  if (insErr) {
+    console.log("ensureWeeklySystemTask insert error:", insErr);
+    return false;
+  }
   return true;
+}
+
+// Tự tạo các nhiệm vụ định kỳ khi một máy mở màn hình chính sau thời điểm đã đặt.
+export async function ensureWeeklySystemTask(rows = []) {
+  const now = new Date();
+  let created = false;
+
+  if (shouldCreateWeeklyTask(now)) {
+    created = await ensureOneWeeklyTask(rows, {
+      kind: "weekly-scale-check",
+      key: getWeekKey(now),
+      title: "KIỂM TRA CÂN ĐIỆN TỬ",
+      content: "",
+    }) || created;
+  }
+
+  const trashTime = getThisWeekWednesday1130(now);
+  if (now.getTime() >= trashTime.getTime()) {
+    created = await ensureOneWeeklyTask(rows, {
+      kind: "weekly-take-out-trash",
+      key: getTrashWeekKey(now),
+      title: "Chiều nay nhớ đổ rác",
+      content: "Thực hiện lúc 11:30 trưa thứ Tư. Xe rác thu lúc 05:00 sáng thứ Năm.",
+    }) || created;
+  }
+
+  return created;
 }

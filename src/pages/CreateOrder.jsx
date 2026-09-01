@@ -266,6 +266,12 @@ if (editingOrder) {
     done_by_name: "",
     delivered_by_name: "",
     completed_by_name: "",
+    warehouse_a_done: false,
+    warehouse_a_done_by_name: "",
+    warehouse_a_done_at: null,
+    warehouse_b_done: false,
+    warehouse_b_done_by_name: "",
+    warehouse_b_done_at: null,
     updated_at: now,
     required_users:
       editingOrder.type === "system_message"
@@ -290,6 +296,12 @@ const updatedOrder = {
   done_by_name: "",
   delivered_by_name: "",
   completed_by_name: "",
+  warehouse_a_done: false,
+  warehouse_a_done_by_name: "",
+  warehouse_a_done_at: null,
+  warehouse_b_done: false,
+  warehouse_b_done_by_name: "",
+  warehouse_b_done_at: null,
   updated_at: now,
 };
 await putLocal("orders", updatedOrder);

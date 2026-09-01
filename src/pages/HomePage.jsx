@@ -48,21 +48,23 @@ const defaultFilterForStatus = (status) => status === "completed" ? "today" : "a
 // Thẻ dùng một màu trung tính; trạng thái đã được tách thành từng tab riêng.
 const getCardColor = () => "#fffaf0";
 // 🔘 BUTTON
-const Btn = ({ children, onClick, active }) => (
+const Btn = ({ children, onClick, active, disabled = false }) => (
   <button
     onClick={(e) => {
       e.stopPropagation();
-      if (onClick) onClick();
+      if (!disabled && onClick) onClick();
     }}
+    disabled={disabled}
     style={{
-      background: active ? "#f2d58f" : "#fff3d6",
+      background: disabled ? "#eee7da" : active ? "#f2d58f" : "#fff3d6",
       border: "1px solid #d1aa62",
-      color: "#4d3218",
+      color: disabled ? "#9a8f80" : "#4d3218",
       fontSize: 15,
       padding: "7px 11px",
       borderRadius: 20,
-      cursor: "pointer",
+      cursor: disabled ? "not-allowed" : "pointer",
       fontWeight: 600,
+      opacity: disabled ? 0.7 : 1,
     }}
   >
     {children}
@@ -100,14 +102,13 @@ const S = {
   },
   orderTitleHeader: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 6,
     minWidth: 0,
     lineHeight: 1.25,
     color: "#6f430d",
     marginBottom: 6,
-    whiteSpace: "nowrap",
-    overflow: "hidden",
+    whiteSpace: "normal",
   },
   priorityInlineLabel: {
     display: "inline-flex",
@@ -135,8 +136,10 @@ const S = {
   },
   orderTitleText: {
     minWidth: 0,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
+    overflow: "visible",
+    whiteSpace: "normal",
+    wordBreak: "break-word",
+    overflowWrap: "anywhere",
     fontSize: 20,
     fontWeight: 800,
     color: "#6f430d",
@@ -245,6 +248,25 @@ const S = {
     justifyContent: "center",
     boxShadow: "0 0 0 2px rgba(216,58,58,.18)",
   },
+  warehouseControls: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+    justifyContent: "flex-end",
+  },
+  warehouseButton: (done) => ({
+    width: 78,
+    minHeight: 42,
+    borderRadius: 9,
+    border: done ? "1px solid #167447" : "1px solid #b88934",
+    background: done ? "#dff5e9" : "#fff3d6",
+    color: done ? "#0f6039" : "#5b3716",
+    fontSize: 14,
+    lineHeight: 1.15,
+    fontWeight: 800,
+    cursor: "pointer",
+    boxShadow: done ? "0 2px 5px rgba(22,116,71,.18)" : "0 2px 5px rgba(91,55,22,.14)",
+  }),
 };
 
 export default function Home() {
@@ -309,6 +331,12 @@ useEffect(() => () => {
   doneAt: row.done_at || null,
   deliveredAt: row.delivered_at || null,
   completedAt: row.completed_at || null,
+  warehouseADone: Boolean(row.warehouse_a_done),
+  warehouseBDone: Boolean(row.warehouse_b_done),
+  warehouseADoneByName: row.warehouse_a_done_by_name || "",
+  warehouseBDoneByName: row.warehouse_b_done_by_name || "",
+  warehouseADoneAt: row.warehouse_a_done_at || null,
+  warehouseBDoneAt: row.warehouse_b_done_at || null,
 });
 
 useEffect(() => {
@@ -449,7 +477,7 @@ homeMemory.loadedAt = Date.now();
 
   };
 
-  useEffect(() => {
+useEffect(() => {
   const run = async () => {
     await refreshCurrentUser();
     if (Date.now() - homeMemory.loadedAt > 30_000) await loadOrdersSupabase();
@@ -524,6 +552,32 @@ useEffect(() => {
     supabase.removeChannel(channel);
   };
 }, []);
+useEffect(() => {
+  const handleMessagesSeen = (event) => {
+    const orderId = event.detail?.orderId;
+    if (orderId) void loadOrderUnreadCounts(orderId);
+  };
+  window.addEventListener("order-messages-seen", handleMessagesSeen);
+  return () => window.removeEventListener("order-messages-seen", handleMessagesSeen);
+}, []);
+
+// Giữ các nhiệm vụ định kỳ xuất hiện đúng giờ kể cả khi màn hình chính đang mở liên tục.
+useEffect(() => {
+  let checking = false;
+  const checkScheduledTasks = async () => {
+    if (checking || document.visibilityState !== "visible") return;
+    checking = true;
+    try {
+      const created = await ensureWeeklySystemTask(orders);
+      if (created) await loadOrdersSupabase();
+    } finally {
+      checking = false;
+    }
+  };
+  const timer = window.setInterval(checkScheduledTasks, 30_000);
+  return () => window.clearInterval(timer);
+}, [orders]);
+
 useEffect(() => {
   const refreshFromLocal = async (event) => {
     const type = event.detail?.entity_type;
@@ -696,11 +750,22 @@ const updateOrder = async (id, action) => {
       done_at: null,
       delivered_at: null,
       completed_at: null,
+      warehouse_a_done: false,
+      warehouse_a_done_by_name: "",
+      warehouse_a_done_at: null,
+      warehouse_b_done: false,
+      warehouse_b_done_by_name: "",
+      warehouse_b_done_at: null,
       updated_at: now,
     };
   }
 
   if (action === "done") {
+    if ((!current.type || current.type === "normal") &&
+        (!current.warehouseADone || !current.warehouseBDone)) {
+      window.alert("Cần hoàn thành cả Kho A và Kho B trước khi bấm Đã xong.");
+      return;
+    }
     updateData = {
       status: "done",
       needs_rework: false,
@@ -797,6 +862,57 @@ const updateOrder = async (id, action) => {
   // Giữ nguyên mục và bộ lọc hiện tại sau khi đổi trạng thái.
 };
 
+const toggleWarehouse = async (id, warehouse) => {
+  const current = orders.find((o) => o.id === id);
+  if (!current || current.status !== "new" || !isNormal(current)) return;
+
+  const me = getCurrentUser() || {};
+  const actorName = me.name || me.username || "Không rõ";
+  const now = new Date().toISOString();
+  const isA = warehouse === "a";
+  const wasDone = isA ? current.warehouseADone : current.warehouseBDone;
+  const updateData = isA
+    ? {
+        warehouse_a_done: !wasDone,
+        warehouse_a_done_by_name: wasDone ? "" : actorName,
+        warehouse_a_done_at: wasDone ? null : now,
+        updated_at: now,
+      }
+    : {
+        warehouse_b_done: !wasDone,
+        warehouse_b_done_by_name: wasDone ? "" : actorName,
+        warehouse_b_done_at: wasDone ? null : now,
+        updated_at: now,
+      };
+
+  const { data, error } = await supabase
+    .from("orders")
+    .update(updateData)
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error || !data) {
+    console.log("UPDATE WAREHOUSE ERROR:", error);
+    window.alert("Chưa cập nhật được trạng thái kho. Vui lòng thử lại.");
+    return;
+  }
+
+  const { error: historyError } = await supabase.from("order_edit_history").insert({
+    order_id: id,
+    editor_id: me.id || null,
+    editor_name: actorName,
+    action: isA ? "warehouse_a" : "warehouse_b",
+    before_data: { done: wasDone },
+    after_data: { done: !wasDone },
+  });
+  if (historyError) console.log("SAVE WAREHOUSE HISTORY ERROR:", historyError);
+
+  await putLocal("orders", data);
+  setOrders((currentOrders) => currentOrders.map((item) => item.id === id ? normalizeOrder(data) : item));
+  void publishSyncEvent({ entityType: "order", entityId: id, payload: data });
+};
+
   // sort ghim lên đầu
   const sorted = useMemo(() => {
     return [...finalFiltered].sort((a, b) => {
@@ -818,6 +934,7 @@ const updateOrder = async (id, action) => {
 
     const displayTitle = o.customer_name || o.title || "";
     const isNormalOrder = !o.type || o.type === "normal";
+    const hasOrderPanel = isNormalOrder;
     const fullText = (isNormalOrder ? "" : (displayTitle ? displayTitle + "\n" : "")) + (o.content || "");
 
     useEffect(() => {
@@ -836,6 +953,7 @@ const updateOrder = async (id, action) => {
         id={`order-${o.id}`}
         style={{
           ...S.card,
+          position: "relative",
           background: getCardColor(o),
           ...(focusOrderId === o.id ? {
             border: "2px solid #c8952e",
@@ -844,7 +962,13 @@ const updateOrder = async (id, action) => {
         }}
         onClick={() => navigate(`/order/${o.id}`)}
       >
-        <div style={{ ...S.cardContent, position: "relative" }}>
+        <div style={hasOrderPanel ? { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 200px", gap: 12 } : undefined}>
+        <div
+          style={{
+            ...S.cardContent,
+            position: "relative",
+          }}
+        >
 {(orderUnreadMap[o.id] || 0) > 0 && (
   <div
     style={{
@@ -879,7 +1003,7 @@ const updateOrder = async (id, action) => {
 
           {isNormalOrder && (
             <div style={S.orderTitleHeader}>
-              {o.pinned && <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>}
+              {o.pinned && o.status === "new" && <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>}
               {o.needs_rework && <span style={S.reworkInlineLabel}>🔁 CẦN LÀM LẠI</span>}
               <span style={S.orderTitleText}>📦 {displayTitle || "Đơn hàng"}</span>
             </div>
@@ -933,11 +1057,49 @@ const updateOrder = async (id, action) => {
 )}
         </div>
 
-        <div
+        {hasOrderPanel && (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            <div style={{ fontSize: 16, color: "#745b3d", whiteSpace: "nowrap" }}>
+              {metaText || formatTime(o.lastActionAt || o.createdAt)}
+            </div>
+            {o.status === "new" && hasPermission(PERMISSIONS.MARK_DONE) && (
+              <div style={S.warehouseControls}>
+                <button
+                  type="button"
+                  style={S.warehouseButton(o.warehouseADone)}
+                  title={o.warehouseADoneByName ? `Bấm bởi ${o.warehouseADoneByName}` : "Kho A chưa xong"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void toggleWarehouse(o.id, "a");
+                  }}
+                >
+                  {o.warehouseADone ? "✓ A xong" : "Kho A"}
+                </button>
+                <button
+                  type="button"
+                  style={S.warehouseButton(o.warehouseBDone)}
+                  title={o.warehouseBDoneByName ? `Bấm bởi ${o.warehouseBDoneByName}` : "Kho B chưa xong"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void toggleWarehouse(o.id, "b");
+                  }}
+                >
+                  {o.warehouseBDone ? "✓ B xong" : "Kho B"}
+                </button>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, flexWrap: "wrap" }}>
+              {children}
+            </div>
+          </div>
+        )}
+        </div>
+
+        {!hasOrderPanel && <div
           style={{
             display: "flex",
             justifyContent: "space-between",
-            alignItems: "center",
+            alignItems: "flex-end",
             marginTop: 10,
             gap: 10,
             flexWrap: "wrap",
@@ -951,6 +1113,7 @@ const updateOrder = async (id, action) => {
             {children}
           </div>
         </div>
+        }
       </div>
     );
   };
@@ -1112,16 +1275,21 @@ const sectionForOrder = (orderItem) => {
             )}
 
             {cardSection === "new" && isNormal(o) && (
-              <>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 6 }}>
                 {hasPermission(PERMISSIONS.EDIT_ORDER) && (
                   <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
                     📌 {o.pinned ? "Bỏ ưu tiên" : "Ghim"}
                   </Btn>
                 )}
                 {hasPermission(PERMISSIONS.MARK_DONE) && (
-                  <Btn onClick={() => updateOrder(o.id, "done")}>✔ Đã xong</Btn>
+                  <Btn
+                    disabled={!o.warehouseADone || !o.warehouseBDone}
+                    onClick={() => updateOrder(o.id, "done")}
+                  >
+                    ✔ Đã xong
+                  </Btn>
                 )}
-              </>
+              </div>
             )}
 
             {cardSection === "done" && isNormal(o) && (

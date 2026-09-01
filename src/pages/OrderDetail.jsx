@@ -460,20 +460,26 @@ useEffect(() => {
   if (!me?.id || messages.length === 0) return;
 
   const markSeen = async () => {
-    const needUpdate = messages.filter(
-      (m) =>
-        m.sender_id !== me.id &&
-        !(m.seen_by || []).includes(me.id)
-    );
+    const { data: remoteMessages, error } = await supabase
+      .from("order_messages")
+      .select("id, sender_id, seen_by")
+      .eq("order_id", id);
+    if (error) return;
+    const needUpdate = (remoteMessages || []).filter((m) => m.sender_id !== me.id && !(m.seen_by || []).includes(me.id));
 
-    for (const m of needUpdate) {
-      await supabase
+    await Promise.all(needUpdate.map(async (m) => {
+      const seenBy = [...(m.seen_by || []), me.id];
+      const { data: updated } = await supabase
         .from("order_messages")
         .update({
-          seen_by: [...(m.seen_by || []), me.id],
+          seen_by: seenBy,
         })
-        .eq("id", m.id);
-    }
+        .eq("id", m.id)
+        .select("*")
+        .single();
+      if (updated) await putLocal("orderMessages", updated);
+    }));
+    window.dispatchEvent(new CustomEvent("order-messages-seen", { detail: { orderId: id } }));
   };
 
   markSeen();
@@ -724,25 +730,25 @@ useEffect(() => {
 
       {/* ===== HEADER ===== */}
       <div style={S.header}>
+        <div style={S.headerTitleRow}>
         <div style={S.title}>
 {order.type === "system_task" && "🚨 NHIỆM VỤ HỆ THỐNG"}
 {order.type === "system_message" && "📢 TIN NHẮN HỆ THỐNG"}
 {(!order.type || order.type === "normal") && (
   <>
-    {order.pinned && <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>}
+    {order.pinned && order.status === "new" && <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>}
     {order.needs_rework && <span style={S.reworkInlineLabel}>🔁 CẦN LÀM LẠI</span>}
     <span>📦 {orderDisplayTitle}</span>
   </>
 )}
 </div>
 
-        Đã xong: {["done", "delivered", "completed"].includes(order.status) ? "✓" : "-"} |
-Giao: {["delivered", "completed"].includes(order.status) ? "✓" : "-"} |
-Hoàn thành: {order.status === "completed" ? "✓" : "-"}
-<OrderActions
+        <OrderActions
   order={order}
+  compact
   onUpdated={(updated) => setOrder(updated)}
-/>
+        />
+        </div>
         <div style={S.sub}>
           Tạo bởi: {order.created_by_name || "Không rõ"} • {new Date(order.created_at).toLocaleString()}
           {order.done_by_name && <> | Đã xong: {order.done_by_name} • {new Date(order.done_at || order.updated_at).toLocaleString()}</>}
@@ -766,7 +772,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         >
           <div style={{ ...S.orderText, ...adaptiveOrderTextStyle }}>
   <div style={{ ...S.orderTitleInside, ...adaptiveOrderTitleStyle }}>
-    {(!order.type || order.type === "normal") && order.pinned && (
+    {(!order.type || order.type === "normal") && order.pinned && order.status === "new" && (
       <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>
     )}
     {(!order.type || order.type === "normal") && order.needs_rework && (
@@ -1113,6 +1119,15 @@ const S = {
     borderBottom: "1px solid #d8b36a",
     boxShadow: "0 3px 12px rgba(91,55,22,.12)",
     zIndex: 100
+  },
+
+  headerTitleRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    minWidth: 0,
+    flexWrap: "wrap"
   },
 
   title: {

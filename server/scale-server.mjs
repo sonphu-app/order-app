@@ -53,6 +53,12 @@ const insertWeighing = database.prepare(`
     gross, tare, net, gross_at, tare_at, created_at, updated_at
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
+const updateWeighing = database.prepare(`
+  UPDATE weighings SET
+    plate = ?, customer = ?, direction = ?, goods = ?, weigher = ?, driver = ?,
+    gross = ?, tare = ?, net = ?, gross_at = ?, tare_at = ?, updated_at = ?
+  WHERE id = ?
+`);
 
 let scaleState = {
   weight: 0,
@@ -147,11 +153,17 @@ function saveRecord(input) {
   const gross = toInteger(input.gross);
   const tare = toInteger(input.tare);
   const net = Number.isFinite(Number(input.net)) ? toInteger(input.net) : gross - tare;
-  const result = insertWeighing.run(
+  const values = [
     String(input.plate || ""), String(input.customer || ""), String(input.direction || ""),
     String(input.goods || ""), String(input.weigher || ""), String(input.driver || ""),
-    gross, tare, net, String(input.grossAt || ""), String(input.tareAt || ""), now, now
-  );
+    gross, tare, net, String(input.grossAt || ""), String(input.tareAt || ""),
+  ];
+  const requestedId = toInteger(input.id);
+  if (requestedId > 0) {
+    const result = updateWeighing.run(...values, now, requestedId);
+    if (result.changes > 0) return listWeighings.all().find((row) => row.id === requestedId);
+  }
+  const result = insertWeighing.run(...values, now, now);
   return listWeighings.all().find((row) => row.id === Number(result.lastInsertRowid));
 }
 

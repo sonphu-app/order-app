@@ -4,7 +4,7 @@ import { hasPermission, PERMISSIONS } from "../utils/permissions";
 import { getCurrentUser } from "../utils/auth";
 import { publishSyncEvent, putLocal } from "../utils/localSync";
 
-export default function OrderActions({ order, onUpdated }) {
+export default function OrderActions({ order, onUpdated, compact = false }) {
   const navigate = useNavigate();
   const me = getCurrentUser();
 
@@ -12,6 +12,11 @@ export default function OrderActions({ order, onUpdated }) {
   const actorName = me?.name || me?.username || "Không rõ";
 
   async function updateStatus(updateData) {
+    if (updateData.status === "done" && isNormal &&
+        (!order.warehouse_a_done || !order.warehouse_b_done)) {
+      window.alert("Cần hoàn thành cả Kho A và Kho B trước khi bấm Đã xong.");
+      return;
+    }
     const now = new Date().toISOString();
     const timedUpdate = { ...updateData };
     if (updateData.status === "done" && updateData.done_by_name) timedUpdate.done_at = now;
@@ -102,6 +107,12 @@ export default function OrderActions({ order, onUpdated }) {
         done_at: null,
         delivered_at: null,
         completed_at: null,
+        warehouse_a_done: false,
+        warehouse_a_done_by_name: "",
+        warehouse_a_done_at: null,
+        warehouse_b_done: false,
+        warehouse_b_done_by_name: "",
+        warehouse_b_done_at: null,
         needs_rework: true,
         understood_by: [],
       }
@@ -150,6 +161,7 @@ export default function OrderActions({ order, onUpdated }) {
   return (
     <div style={S.actionRow}>
       {/* ===== BÊN TRÁI: TRẠNG THÁI ===== */}
+      {!compact && (
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {/* ========== SYSTEM TASK ========== */}
         {isSystemTask && (
@@ -310,10 +322,11 @@ export default function OrderActions({ order, onUpdated }) {
           </>
         )}
       </div>
+      )}
 
       {/* ===== BÊN PHẢI: HÀNH ĐỘNG ===== */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {hasPermission(PERMISSIONS.EDIT_ORDER) &&
+        {!compact && hasPermission(PERMISSIONS.EDIT_ORDER) &&
           !(isNormal && order.status === "completed" && order.delivered_by_name) && (
           <button style={S.btn} onClick={handleReset}>
             Làm lại
