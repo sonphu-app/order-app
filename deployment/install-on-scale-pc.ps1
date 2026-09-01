@@ -51,6 +51,8 @@ if (-not $existingRule) {
 
 $desktopPath = [Environment]::GetFolderPath("Desktop")
 $shortcutPath = Join-Path $desktopPath $scaleShortcutName
+$startupPath = [Environment]::GetFolderPath("Startup")
+$startupShortcutPath = Join-Path $startupPath "Can Son Phu 2026 - Tu khoi dong.lnk"
 $powerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $launcherPath = Join-Path $scaleDestinationPath "server\start-scale.ps1"
 $shell = New-Object -ComObject WScript.Shell
@@ -67,11 +69,20 @@ $scaleIconPath = $edgeCandidates | Where-Object { Test-Path -LiteralPath $_ } | 
 if ($scaleIconPath) { $shortcut.IconLocation = "$scaleIconPath,0" }
 $shortcut.Save()
 
+$startupShortcut = $shell.CreateShortcut($startupShortcutPath)
+$startupShortcut.TargetPath = $powerShellPath
+$startupShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPath`""
+$startupShortcut.WorkingDirectory = $scaleDestinationPath
+$startupShortcut.Description = "Tu dong mo Can Son Phu 2026 khi dang nhap Windows"
+if ($scaleIconPath) { $startupShortcut.IconLocation = "$scaleIconPath,0" }
+$startupShortcut.Save()
+
 Write-Host ""
 Write-Host "DA CAI XONG CAN SON PHU 2026" -ForegroundColor Green
 Write-Host "Du lieu se luu tai: $scaleDatabasePath"
 Write-Host "May khac trong LAN mo: http://192.168.1.12:8787/scale"
 Write-Host "Bieu tuong da tao ngoai Desktop."
+Write-Host "Da cai tu khoi dong: dang nhap Windows se tu mo http://127.0.0.1:8787/scale"
 Write-Host ""
 
 Start-Process -FilePath $powerShellPath `
