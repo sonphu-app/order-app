@@ -24,7 +24,12 @@ export default function BottomNav({
       {/* nhóm 4 nút */}
       <div style={s.mainGroup}>
         {hasPermission(PERMISSIONS.WEIGHING) && (
-          <Item icon="⚖️" text="Cân xe" active={active === "scale"} />
+          <Item
+            icon="⚖️"
+            text="Cân xe"
+            active={active === "scale"}
+            onClick={() => navigate("/scale")}
+          />
         )}
 
         {hasPermission(PERMISSIONS.CHAT) && (

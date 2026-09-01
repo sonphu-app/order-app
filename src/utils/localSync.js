@@ -242,9 +242,12 @@ export async function applySyncEvent(event) {
   }
 
   const payload = { ...(event.payload || {}), id: event.entity_id };
-  // Keep remote image rows lightweight. Image bytes are cached by the image
-  // component only when it approaches the viewport.
+  // Keep remote image rows lightweight while preserving their bytes locally.
   if (payload.image_url && !String(payload.image_url).startsWith("data:")) {
+    const cachedUrl = await cacheImage(payload.image_url);
+    // Do not acknowledge an image event until the bytes are safely stored in
+    // IndexedDB. Supabase Storage may be cleaned as soon as every device ACKs.
+    if (cachedUrl === payload.image_url) return false;
     delete payload.local_image_url;
   }
   await putLocal(storeName, payload);
@@ -273,11 +276,12 @@ export async function publishSyncEvent({ entityType, entityId, operation = "upse
     payload,
     storage_paths: storagePaths,
     required_user_ids: required,
-    received_by: [me.id],
+    received_by: [],
     created_at: now.toISOString(),
     expires_at: new Date(now.getTime() + EVENT_TTL_MS).toISOString(),
   };
-  await applySyncEvent(event);
+  const locallyApplied = await applySyncEvent(event);
+  if (locallyApplied) event.received_by = [me.id];
   const { data, error } = await supabase.from("sync_events").insert(event).select().single();
   if (error) {
     if (error.code !== "42P01") console.log("PUBLISH SYNC EVENT ERROR:", error);

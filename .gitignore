@@ -25,4 +25,11 @@ dist-ssr
 
 .vercel
 .env
+.scale-data/
+deployment/dist/
+deployment/node_modules/
+deployment/runtime/
+deployment/server/
+deployment/package-lock.json
+/Cân Sơn Phú 2026 - Máy đầu cân.zip
 supabase/.temp/

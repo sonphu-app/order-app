@@ -1,0 +1,13 @@
+BO CAI MAY DAU CAN - CAN SON PHU 2026
+
+1. Chep file ZIP sang may co dau can IP 192.168.1.12.
+2. Giai nen file ZIP.
+3. Bam chuot phai CAI-CAN-SON-PHU.cmd, chon Run as administrator.
+4. Chon Yes khi Windows hoi quyen.
+5. Sau khi cai xong, bam bieu tuong Can Son Phu 2026 ngoai Desktop.
+
+Du lieu can chi luu tren may dau can tai:
+D:\Can Son Phu 2026\Can Son Phu 2026.sqlite
+
+May khac cung LAN mo:
+http://192.168.1.12:8787/scale

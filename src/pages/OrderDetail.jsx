@@ -12,6 +12,7 @@ import {
 } from "../utils/localSync";
 import { createImagePreviewBlob } from "../utils/imagePreview";
 import { getClipboardImageFiles } from "../utils/clipboardImages";
+import CachedImage from "../components/CachedImage";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
 
@@ -782,7 +783,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
           {order.images?.length > 0 && (
   <div style={S.orderImages}>
     {order.images.map((img, i) => (
-  <img
+  <CachedImage
     key={`${i}-${img}`}
     src={img}
     alt=""
@@ -866,7 +867,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
 {!m.recalled && m.text !== "Tin nhắn đã thu hồi" && m.images?.length > 0 && (
   <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
     {m.images.map((img, i) => (
-      <img
+      <CachedImage
   key={`${i}-${img}`}
   src={img}
   alt=""
@@ -904,7 +905,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
     <div style={S.previewRow}>
       {images.map((img, i) => (
   <div key={i} style={S.previewItem}>
-    <img
+    <CachedImage
       src={img}
       style={S.previewImg}
       onClick={() => setEditIndex(i)}
@@ -975,7 +976,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         ✕
       </button>
 
-      <img
+      <CachedImage
         src={viewerImageSrc || order.images[viewerIndex]}
         alt=""
         style={{ ...S.viewerImg, transform: `scale(${viewerZoom})` }}
@@ -1055,7 +1056,7 @@ Hoàn thành: {order.status === "completed" ? "✓" : "-"}
         ✕
       </button>
 
-      <img
+      <CachedImage
         src={chatViewerImageSrc || chatViewer.imgs[chatViewer.i]}
         alt=""
         style={{ ...S.viewerImg, transform: `scale(${chatViewerZoom})` }}

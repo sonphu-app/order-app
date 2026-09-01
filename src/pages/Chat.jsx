@@ -7,6 +7,7 @@ import { deleteLocal, getAllLocal, publishSyncEvent, putLocal, putManyLocal } fr
 import { createImagePreviewBlob } from "../utils/imagePreview";
 import { getClipboardImageFiles } from "../utils/clipboardImages";
 import { useNavigate } from "react-router-dom";
+import CachedImage from "../components/CachedImage";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
 
@@ -502,7 +503,7 @@ export default function Chat() {
                 {!!m.images?.length && (
                   <div className="msgImages">
                     {m.images.map((img, i) => (
-                      <img
+                      <CachedImage
                         key={`${i}-${img}`}
                         src={img}
                         className="chatImg"
@@ -527,7 +528,7 @@ export default function Chat() {
         <div className="previewRow">
           {attachments.map((img, i) => (
             <div key={i} className="previewBox">
-              <img src={img} alt="" />
+              <CachedImage src={img} alt="" />
               <button
                 type="button"
                 className="previewEdit"
@@ -616,7 +617,7 @@ export default function Chat() {
             ×
           </button>
 
-          <img
+          <CachedImage
             src={viewerImageSrc || viewer.images[viewer.index]}
             className="viewerImg"
             alt=""

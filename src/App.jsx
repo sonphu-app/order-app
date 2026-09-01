@@ -10,6 +10,7 @@ const Chat = lazy(() => import("./pages/Chat"));
 const Account = lazy(() => import("./pages/Account"));
 const Login = lazy(() => import("./pages/Login"));
 const OrderDetail = lazy(() => import("./pages/OrderDetail"));
+const Weighing = lazy(() => import("./pages/Weighing"));
 
 function Allowed({ permission, children }) {
   return hasPermission(permission) ? children : <Navigate to="/" replace />;
@@ -17,9 +18,10 @@ function Allowed({ permission, children }) {
 
 export default function App() {
   const [user, setUser] = useState(getCurrentUser());
+  const isStandaloneScale = window.location.pathname === "/scale";
 
   useEffect(() => {
-    if (!user?.id) return undefined;
+    if (isStandaloneScale || !user?.id) return undefined;
     const notify = (event) => window.dispatchEvent(new CustomEvent("sonphu-local-sync", { detail: event }));
     let syncing = false;
     let realtimeReady = false;
@@ -48,7 +50,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", syncNow);
     };
-  }, [user?.id]);
+  }, [isStandaloneScale, user?.id]);
 
   // cho Login gọi để refresh sau khi đăng nhập
   useEffect(() => {
@@ -58,6 +60,7 @@ export default function App() {
     };
   }, []);
 
+  if (isStandaloneScale) return <Suspense fallback={null}><Weighing /></Suspense>;
   if (!user) return <Suspense fallback={null}><Login /></Suspense>;
 
   return (
@@ -68,6 +71,7 @@ export default function App() {
         <Route path="/chat" element={<Allowed permission={PERMISSIONS.CHAT}><Chat /></Allowed>} />
         <Route path="/account" element={<Account />} />
         <Route path="/order/:id" element={<OrderDetail />} />
+        <Route path="/scale" element={<Allowed permission={PERMISSIONS.WEIGHING}><Weighing /></Allowed>} />
       </Routes>
     </Suspense>
   );

@@ -1,0 +1,9 @@
+{
+  "name": "can-son-phu-2026",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "serialport": "^13.0.0"
+  }
+}
