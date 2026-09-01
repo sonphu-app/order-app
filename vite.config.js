@@ -2,8 +2,27 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const buildVersion = new Date().toISOString()
+
+function appVersionPlugin() {
+  return {
+    name: 'sonphu-app-version',
+    config() {
+      return { define: { __APP_BUILD_VERSION__: JSON.stringify(buildVersion) } }
+    },
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'app-version.json',
+        source: JSON.stringify({ version: buildVersion }),
+      })
+    },
+  }
+}
+
 export default defineConfig({
   plugins: [
+    appVersionPlugin(),
     react(),
     VitePWA({
       strategies: 'injectManifest',
