@@ -103,6 +103,7 @@ const S = {
   orderTitleHeader: {
     display: "flex",
     alignItems: "flex-start",
+    flexWrap: "wrap",
     gap: 6,
     minWidth: 0,
     lineHeight: 1.25,
@@ -135,6 +136,7 @@ const S = {
     whiteSpace: "nowrap",
   },
   orderTitleText: {
+    flex: "1 1 140px",
     minWidth: 0,
     overflow: "visible",
     whiteSpace: "normal",
@@ -962,7 +964,7 @@ const toggleWarehouse = async (id, warehouse) => {
         }}
         onClick={() => navigate(`/order/${o.id}`)}
       >
-        <div style={hasOrderPanel ? { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 200px", gap: 12 } : undefined}>
+        <div style={hasOrderPanel ? { display: "grid", gridTemplateColumns: "minmax(0, 1fr) clamp(118px, 22vw, 200px)", gap: 10 } : undefined}>
         <div
           style={{
             ...S.cardContent,
@@ -1059,7 +1061,7 @@ const toggleWarehouse = async (id, warehouse) => {
 
         {hasOrderPanel && (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-            <div style={{ fontSize: 16, color: "#745b3d", whiteSpace: "nowrap" }}>
+            <div style={{ fontSize: 16, color: "#745b3d", textAlign: "right", lineHeight: 1.3 }}>
               {metaText || formatTime(o.lastActionAt || o.createdAt)}
             </div>
             {o.status === "new" && hasPermission(PERMISSIONS.MARK_DONE) && (
@@ -1275,18 +1277,18 @@ const sectionForOrder = (orderItem) => {
             )}
 
             {cardSection === "new" && isNormal(o) && (
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 6 }}>
-                {hasPermission(PERMISSIONS.EDIT_ORDER) && (
-                  <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
-                    📌 {o.pinned ? "Bỏ ưu tiên" : "Ghim"}
-                  </Btn>
-                )}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
                 {hasPermission(PERMISSIONS.MARK_DONE) && (
                   <Btn
                     disabled={!o.warehouseADone || !o.warehouseBDone}
                     onClick={() => updateOrder(o.id, "done")}
                   >
                     ✔ Đã xong
+                  </Btn>
+                )}
+                {hasPermission(PERMISSIONS.EDIT_ORDER) && (
+                  <Btn onClick={() => togglePin(o.id)} active={o.pinned}>
+                    📌 {o.pinned ? "Bỏ ưu tiên" : "Ghim"}
                   </Btn>
                 )}
               </div>
