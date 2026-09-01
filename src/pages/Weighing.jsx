@@ -19,16 +19,59 @@ const SAMPLE_ROWS = [
 
 const padWeight = (value) => String(Math.max(0, Math.round(Number(value) || 0))).padStart(6, " ");
 const numberText = (value) => Number(value || 0).toLocaleString("vi-VN");
-const EMPTY_ROW = { id: null, gross: 0, tare: 0, net: 0, plate: "", customer: "", direction: "", goods: "", grossAt: "", tareAt: "" };
+const EMPTY_ROW = { id: null, gross: 0, tare: 0, net: 0, plate: "", plateNote: "", customer: "", direction: "", goods: "", grossAt: "", tareAt: "", charge: 0, paid: 0, cancelled: 0, seriesId: "" };
 const DEFAULT_SCALE_FORM = {
   customer: "Vãng Lai",
   plate: "",
+  plateNote: "",
   direction: "Cân Dịch Vụ",
   goods: "Hàng hóa",
   weigher: "",
   driver: "",
 };
 const DEFAULT_PRICE_TIERS = [{ name: "Mặc định", maxTons: "", price: "" }];
+const HISTORY_COLUMNS = [
+  { key: "cancel", label: "Hủy", width: 5, min: 4 },
+  { key: "plate", label: "Biển số", width: 9, min: 6 },
+  { key: "customer", label: "Khách hàng", width: 11, min: 7 },
+  { key: "gross", label: "KL tổng", width: 6, min: 5 },
+  { key: "tare", label: "KL bì", width: 6, min: 5 },
+  { key: "grossAt", label: "Ngày tổng", width: 10, min: 7 },
+  { key: "tareAt", label: "Ngày bì", width: 10, min: 7 },
+  { key: "direction", label: "Xuất/Nhập", width: 8, min: 6 },
+  { key: "goods", label: "Loại hàng", width: 8, min: 6 },
+  { key: "charge", label: "Thành tiền", width: 10, min: 7 },
+  { key: "paid", label: "Đã TT", width: 5, min: 4 },
+  { key: "debt", label: "Còn nợ", width: 12, min: 7 },
+];
+const DEFAULT_HISTORY_COLUMN_WIDTHS = HISTORY_COLUMNS.map((column) => column.width);
+
+function normalizePlate(value) {
+  const compact = String(value || "").toLocaleUpperCase("vi-VN").replace(/[^0-9A-Z]/g, "");
+  const match = compact.match(/^(\d{2}[A-Z]{1,2})(\d{4,5})$/);
+  return match ? `${match[1]} ${match[2]}` : String(value || "").trim().replace(/\s+/g, " ").toLocaleUpperCase("vi-VN");
+}
+
+function rowDate(row) {
+  const value = row.updatedAt || row.tareAt || row.grossAt || row.createdAt;
+  const date = new Date(value || 0);
+  return Number.isNaN(date.getTime()) ? new Date(0) : date;
+}
+
+function normalizeWeighing(row) {
+  const charge = Math.max(0, Number(row.charge ?? row.weigher) || 0);
+  const paid = Math.max(0, Number(row.paid ?? row.driver) || 0);
+  return {
+    ...row,
+    plateNote: row.plateNote || "",
+    charge,
+    paid,
+    noCharge: Boolean(row.noCharge),
+    cancelled: Boolean(row.cancelled),
+    cancelledAt: row.cancelledAt || "",
+    seriesId: row.seriesId || (row.id ? `scale-${row.id}` : ""),
+  };
+}
 
 function findAutomaticPrice(priceTiers, goodsName, netWeight) {
   const normalizedGoods = String(goodsName || "").trim().toLocaleLowerCase("vi-VN");
@@ -42,7 +85,7 @@ function findAutomaticPrice(priceTiers, goodsName, netWeight) {
     .map((tier) => ({ ...tier, limit: Number(tier.maxTons) > 0 ? Number(tier.maxTons) : Number.POSITIVE_INFINITY }))
     .filter((tier) => tons <= tier.limit)
     .sort((left, right) => left.limit - right.limit)[0]?.price || 0);
-  return configuredPrice >= 1000 ? configuredPrice / 1000 : configuredPrice;
+  return configuredPrice;
 }
 
 const SEGMENTS = {
@@ -70,26 +113,52 @@ export default function Weighing() {
   const [liveWeight, setLiveWeight] = useState(34680);
   const [lockedWeight, setLockedWeight] = useState(34680);
   const [filter, setFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("last30");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
   const [selectedId, setSelectedId] = useState(2162);
   const [captured, setCaptured] = useState({ gross: 54000, tare: 19320, grossAt: "", tareAt: "" });
   const [captureLocked, setCaptureLocked] = useState({ gross: true, tare: true });
   const [newWeighingPrimed, setNewWeighingPrimed] = useState(false);
+  const [additionalWeighingActive, setAdditionalWeighingActive] = useState(false);
   const [chargeInput, setChargeInput] = useState("");
   const [noExtraCharge, setNoExtraCharge] = useState(false);
   const [totalCharge, setTotalCharge] = useState(0);
   const [lockedChargeRate, setLockedChargeRate] = useState(0);
+  const [chargeManuallyEdited, setChargeManuallyEdited] = useState(false);
   const [paidChecked, setPaidChecked] = useState(false);
   const [paidInput, setPaidInput] = useState("");
   const [moneyMessage, setMoneyMessage] = useState("");
   const [priceTableOpen, setPriceTableOpen] = useState(false);
+  const [statisticsOpen, setStatisticsOpen] = useState(false);
+  const [statisticsMode, setStatisticsMode] = useState("overall");
+  const [seriesId, setSeriesId] = useState("");
   const [priceTiers, setPriceTiers] = useState(() => {
     try {
       const saved = JSON.parse(window.localStorage.getItem("scale-price-tiers") || "null");
       if (!Array.isArray(saved) || !saved.length) return DEFAULT_PRICE_TIERS;
-      const normalized = saved.map((tier) => ({ name: tier.name || "Mặc định", maxTons: tier.maxTons ?? "", price: tier.price ?? "" }));
+      const normalized = saved.map((tier) => {
+        const savedPrice = Number(tier.price) || 0;
+        return {
+          name: tier.name || "Mặc định",
+          maxTons: tier.maxTons ?? "",
+          price: savedPrice > 0 && savedPrice < 1000 ? String(savedPrice * 1000) : (tier.price ?? ""),
+        };
+      });
       return normalized.every((tier) => !tier.price) ? DEFAULT_PRICE_TIERS : normalized;
     } catch {
       return DEFAULT_PRICE_TIERS;
+    }
+  });
+  const [historyColumnWidths, setHistoryColumnWidths] = useState(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem("scale-history-column-widths") || "null");
+      const savedTotal = Array.isArray(saved) ? saved.reduce((total, width) => total + Number(width || 0), 0) : 0;
+      return Array.isArray(saved) && saved.length === HISTORY_COLUMNS.length && saved.every((width) => Number(width) > 0) && Math.abs(savedTotal - 100) < 0.5
+        ? saved.map(Number)
+        : DEFAULT_HISTORY_COLUMN_WIDTHS;
+    } catch {
+      return DEFAULT_HISTORY_COLUMN_WIDTHS;
     }
   });
   const [saving, setSaving] = useState(false);
@@ -111,6 +180,10 @@ export default function Weighing() {
   useEffect(() => {
     window.localStorage.setItem("scale-price-tiers", JSON.stringify(priceTiers));
   }, [priceTiers]);
+
+  useEffect(() => {
+    window.localStorage.setItem("scale-history-column-widths", JSON.stringify(historyColumnWidths));
+  }, [historyColumnWidths]);
 
   useEffect(() => {
     if (!printPreviewOpen) return undefined;
@@ -156,16 +229,25 @@ export default function Weighing() {
         setWeightLocked(Boolean(state.locked));
         setLiveWeight(Number(state.weight) || 0);
         setLockedWeight(Number(state.lockedWeight) || 0);
-        setRows(savedRows);
-        setSelectedId(savedRows.at(0)?.id ?? null);
-        if (savedRows.at(0)) {
+        const normalizedRows = savedRows.map(normalizeWeighing);
+        setRows(normalizedRows);
+        setSelectedId(normalizedRows.at(0)?.id ?? null);
+        if (normalizedRows.at(0)) {
+          const first = normalizedRows[0];
           setCaptured({
-            gross: savedRows[0].gross,
-            tare: savedRows[0].tare,
-            grossAt: savedRows[0].grossAt || "",
-            tareAt: savedRows[0].tareAt || "",
+            gross: first.gross,
+            tare: first.tare,
+            grossAt: first.grossAt || "",
+            tareAt: first.tareAt || "",
           });
-          setCaptureLocked({ gross: savedRows[0].gross > 0, tare: savedRows[0].tare > 0 });
+          setCaptureLocked({ gross: first.gross > 0, tare: first.tare > 0 });
+          setForm((current) => ({ ...current, customer: first.customer, plate: first.plate, plateNote: first.plateNote, direction: first.direction, goods: first.goods }));
+          setTotalCharge(first.charge);
+          setChargeInput(first.charge ? String(first.charge) : "");
+          setPaidInput(first.paid ? String(first.paid) : "");
+          setPaidChecked(first.charge > 0 && first.paid >= first.charge);
+          setNoExtraCharge(first.noCharge);
+          setSeriesId(first.seriesId);
         } else {
           setCaptured({ gross: 0, tare: 0, grossAt: "", tareAt: "" });
           setCaptureLocked({ gross: false, tare: false });
@@ -200,8 +282,31 @@ export default function Weighing() {
   }, [lanConnected, scaleOpen, selected.net, weightLocked]);
 
   const visibleRows = rows.filter((row) => {
-    if (filter === "pending") return !row.gross || !row.tare;
-    if (filter === "done") return row.gross > 0 && row.tare > 0;
+    if (filter === "pending" && row.gross > 0 && row.tare > 0) return false;
+    if (filter === "done" && (!row.gross || !row.tare)) return false;
+
+    const date = rowDate(row);
+    const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
+    const startMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startYear = new Date(now.getFullYear(), 0, 1);
+    if (dateFilter === "last30") {
+      const start = new Date(startToday); start.setDate(start.getDate() - 29);
+      return date >= start;
+    }
+    if (dateFilter === "today") return date >= startToday;
+    if (["yesterday", "2days", "3days", "7days"].includes(dateFilter)) {
+      const days = dateFilter === "7days" ? 6 : (dateFilter === "yesterday" ? 1 : Number(dateFilter.replace("days", "")));
+      const start = new Date(startToday); start.setDate(start.getDate() - days);
+      const end = new Date(start); end.setDate(end.getDate() + 1);
+      return date >= start && (dateFilter === "7days" ? date <= now : date < end);
+    }
+    if (dateFilter === "month") return date >= startMonth;
+    if (dateFilter === "year") return date >= startYear;
+    if (dateFilter === "custom") {
+      const from = customFrom ? new Date(`${customFrom}T00:00:00`) : new Date(0);
+      const to = customTo ? new Date(`${customTo}T23:59:59.999`) : now;
+      return date >= from && date <= to;
+    }
     return true;
   });
 
@@ -211,15 +316,18 @@ export default function Weighing() {
   };
   const selectRow = (row) => {
     setNewWeighingPrimed(false);
-    const savedTotal = Math.max(0, Number(row.weigher) || 0);
-    const savedPaid = Math.max(0, Number(row.driver) || 0);
+    setAdditionalWeighingActive(false);
+    const savedTotal = Math.max(0, Number(row.charge ?? row.weigher) || 0);
+    const savedPaid = Math.max(0, Number(row.paid ?? row.driver) || 0);
     setTotalCharge(savedTotal);
     setLockedChargeRate((row.gross > 0) !== (row.tare > 0) ? savedTotal : 0);
-    setPaidInput(savedPaid ? String(savedPaid / 1000) : "");
+    setPaidInput(savedPaid ? String(savedPaid) : "");
     setPaidChecked(savedTotal > 0 && savedPaid >= savedTotal);
-    setChargeInput(savedTotal ? String(savedTotal / 1000) : "");
-    setNoExtraCharge(false);
+    setChargeInput(savedTotal ? String(savedTotal) : "");
+    setNoExtraCharge(Boolean(row.noCharge));
+    setChargeManuallyEdited(savedTotal > 0);
     setMoneyMessage("");
+    setSeriesId(row.seriesId || `scale-${row.id}`);
     setSelectedId(row.id);
     setLiveWeight(row.net);
     setLockedWeight(row.net);
@@ -235,6 +343,7 @@ export default function Weighing() {
       ...current,
       customer: row.customer,
       plate: row.plate,
+      plateNote: row.plateNote || "",
       direction: row.direction,
       goods: row.goods,
     }));
@@ -263,6 +372,7 @@ export default function Weighing() {
   const toggleWeightLock = async () => {
     if (!scaleOpen) return;
     if (!weightLocked && liveWeight <= 0) return;
+    if (weightLocked) applyHigherAutomaticPrice(liveWeight || lockedWeight);
     if (lanConnected) {
       try {
         await updateScaleState({ locked: !weightLocked });
@@ -282,7 +392,7 @@ export default function Weighing() {
 
   const startNewWeighing = () => {
     if (newWeighingPrimed) {
-      setForm({ customer: "", plate: "", direction: "", goods: "", weigher: "", driver: "" });
+      setForm({ customer: "", plate: "", plateNote: "", direction: "", goods: "", weigher: "", driver: "" });
       setNewWeighingPrimed(false);
       setChargeInput("");
       setNoExtraCharge(false);
@@ -291,19 +401,43 @@ export default function Weighing() {
       setPaidInput("");
       setPaidChecked(false);
       setMoneyMessage("");
+      setSeriesId("");
+      setChargeManuallyEdited(false);
+      setAdditionalWeighingActive(false);
       return;
     }
+    const preservedCharge = weightLocked ? Math.max(lockedChargeRate, totalCharge) : 0;
     setSelectedId(null);
     setCaptured({ gross: 0, tare: 0, grossAt: "", tareAt: "" });
     setCaptureLocked({ gross: false, tare: false });
     setNewWeighingPrimed(true);
-    setChargeInput("");
+    setChargeInput(preservedCharge > 0 ? String(preservedCharge) : "");
     setNoExtraCharge(false);
-    setTotalCharge(0);
-    setLockedChargeRate(0);
+    setTotalCharge(preservedCharge);
+    setLockedChargeRate(preservedCharge);
     setPaidInput("");
     setPaidChecked(false);
     setMoneyMessage("");
+    setSeriesId("");
+    setChargeManuallyEdited(preservedCharge > 0);
+    setAdditionalWeighingActive(false);
+  };
+
+  const startAdditionalWeighing = () => {
+    const nextSeriesId = seriesId || selected.seriesId || (selected.id ? `scale-${selected.id}` : crypto.randomUUID());
+    setSeriesId(nextSeriesId);
+    setSelectedId(null);
+    setCaptureLocked({ gross: false, tare: false });
+    setNewWeighingPrimed(false);
+    setAdditionalWeighingActive(true);
+    setChargeInput("");
+    setTotalCharge(0);
+    setLockedChargeRate(0);
+    setChargeManuallyEdited(false);
+    setNoExtraCharge(false);
+    setPaidInput("");
+    setPaidChecked(false);
+    setMoneyMessage("Cân lại tổng hoặc bì để tạo mã cân tiếp theo");
   };
 
   const captureWeight = async (kind) => {
@@ -317,65 +451,193 @@ export default function Weighing() {
     }
     const manualCharge = Number(chargeInput);
     const hasBothWeights = next.gross > 0 && next.tare > 0;
-    const pricingWeight = hasBothWeights ? Math.abs(next.gross - next.tare) : value;
-    const automaticCharge = !noExtraCharge && (!Number.isFinite(manualCharge) || manualCharge <= 0)
-      ? (lockedChargeRate > 0 ? lockedChargeRate / 1000 : Number(findAutomaticPrice(priceTiers, form.goods, pricingWeight)))
+    const pricingWeight = additionalWeighingActive ? value : (hasBothWeights ? Math.abs(next.gross - next.tare) : value);
+    const automaticCharge = !noExtraCharge && !chargeManuallyEdited
+      ? (additionalWeighingActive
+        ? Number(findAutomaticPrice(priceTiers, form.goods, pricingWeight))
+        : (lockedChargeRate > 0 ? lockedChargeRate : Number(findAutomaticPrice(priceTiers, form.goods, pricingWeight))))
       : 0;
-    if (!noExtraCharge && (!Number.isFinite(manualCharge) || manualCharge <= 0) && automaticCharge <= 0) {
-      setMoneyMessage("Chưa có giá phù hợp trong Bảng giá");
-      return;
-    }
-    const appliedCharge = noExtraCharge ? 0 : (manualCharge > 0 ? manualCharge : automaticCharge);
-    const nextTotalCharge = totalCharge + Math.round(appliedCharge * 1000);
-    if (appliedCharge > 0 && lockedChargeRate <= 0) setLockedChargeRate(Math.round(appliedCharge * 1000));
-    setMoneyMessage(automaticCharge > 0 ? `Đã tự áp giá ${numberText(automaticCharge * 1000)}đ` : "");
-    const currentPaid = Math.max(0, Math.round((Number(paidInput) || 0) * 1000));
+    const appliedCharge = noExtraCharge ? 0 : (chargeManuallyEdited ? Math.max(0, manualCharge) : automaticCharge);
+    const nextTotalCharge = Math.round(appliedCharge);
+    if (appliedCharge > 0 && (additionalWeighingActive || lockedChargeRate <= 0)) setLockedChargeRate(Math.round(appliedCharge));
+    setMoneyMessage(automaticCharge > 0 ? `Đã tự áp giá ${numberText(automaticCharge)}đ` : (!noExtraCharge && !chargeManuallyEdited ? "Chưa có giá phù hợp trong Bảng giá" : ""));
+    const currentPaid = Math.max(0, Math.round(Number(paidInput) || 0));
     const nextPaid = paidChecked ? nextTotalCharge : currentPaid;
     setTotalCharge(nextTotalCharge);
-    if (paidChecked) setPaidInput(String(nextPaid / 1000));
-    setChargeInput(String(appliedCharge));
-    setNoExtraCharge(false);
+    if (paidChecked) setPaidInput(String(nextPaid));
+    setChargeInput(appliedCharge > 0 ? String(appliedCharge) : "0");
     setCaptured(next);
-    setCaptureLocked((current) => ({ ...current, [kind]: true }));
+    setCaptureLocked((current) => additionalWeighingActive ? { gross: true, tare: true } : { ...current, [kind]: true });
     if (!lanConnected) return;
 
     setSaving(true);
     try {
+      const nextSeriesId = seriesId || (selectedId ? selected.seriesId || `scale-${selectedId}` : crypto.randomUUID());
       const saved = await saveWeighing({
         id: selectedId,
         ...form,
         weigher: String(nextTotalCharge),
         driver: String(nextPaid),
+        charge: nextTotalCharge,
+        paid: nextPaid,
+        noCharge: noExtraCharge,
+        seriesId: nextSeriesId,
         ...next,
         net: next.gross - next.tare,
       });
-      setRows((current) => [saved, ...current.filter((row) => row.id !== saved.id)]);
+      const normalized = normalizeWeighing(saved);
+      setRows((current) => [normalized, ...current.filter((row) => row.id !== normalized.id)]);
       setSelectedId(saved.id);
+      setSeriesId(nextSeriesId);
+      setAdditionalWeighingActive(false);
     } finally {
       setSaving(false);
     }
   };
 
-  const storeCurrentWeighing = async () => {
-    if (!lanConnected || saving) return;
+  const persistCurrentWeighing = async (overrides = {}) => {
+    if (!lanConnected || saving || !selectedId) return;
+    const charge = overrides.charge ?? totalCharge;
+    const paid = overrides.paid ?? Math.max(0, Math.round(Number(paidInput) || 0));
     setSaving(true);
     try {
-      const saved = await saveWeighing({
-        id: selectedId,
+      const saved = normalizeWeighing(await saveWeighing({
+        ...selected,
         ...form,
-        weigher: String(totalCharge),
-        driver: String(Math.max(0, Math.round((Number(paidInput) || 0) * 1000))),
+        id: selectedId,
+        charge,
+        paid,
+        noCharge: overrides.noCharge ?? noExtraCharge,
+        weigher: String(charge),
+        driver: String(paid),
         gross: captured.gross,
         tare: captured.tare,
         net: captured.gross - captured.tare,
         grossAt: captured.grossAt || "",
         tareAt: captured.tareAt || "",
-      });
+        seriesId: seriesId || selected.seriesId || `scale-${selectedId}`,
+      }));
       setRows((current) => [saved, ...current.filter((row) => row.id !== saved.id)]);
-      setSelectedId(saved.id);
     } finally {
       setSaving(false);
     }
+  };
+
+  const applyHigherAutomaticPrice = (weight) => {
+    if (noExtraCharge) return;
+    const referenceWeight = captured.gross > 0 && captured.tare > 0
+      ? Math.max(Math.abs(Number(weight) - captured.gross), Math.abs(Number(weight) - captured.tare))
+      : Number(weight) || 0;
+    const nextPrice = Math.round(Number(findAutomaticPrice(priceTiers, form.goods, referenceWeight)));
+    if (nextPrice <= totalCharge) return;
+    setTotalCharge(nextPrice);
+    setChargeInput(String(nextPrice));
+    setLockedChargeRate(nextPrice);
+    setChargeManuallyEdited(false);
+    setMoneyMessage(`Giá mới ${numberText(nextPrice)}đ, nợ ${numberText(Math.max(0, nextPrice - paidAmount))}đ`);
+    if (paidChecked) setPaidInput(String(nextPrice));
+    void persistCurrentWeighing({ charge: nextPrice, paid: paidChecked ? nextPrice : paidAmount });
+  };
+
+  const changeCharge = (value) => {
+    const charge = Math.max(0, Math.round(Number(value) || 0));
+    setChargeInput(value);
+    setTotalCharge(charge);
+    setChargeManuallyEdited(true);
+    setMoneyMessage("");
+    if (paidChecked) setPaidInput(String(charge));
+  };
+
+  const changePaid = (value) => {
+    setPaidChecked(false);
+    setPaidInput(value);
+  };
+
+  const toggleNoCharge = (checked) => {
+    setNoExtraCharge(checked);
+    setMoneyMessage("");
+    if (checked) {
+      setChargeInput("0");
+      setTotalCharge(0);
+      setPaidInput("0");
+      setPaidChecked(false);
+      setChargeManuallyEdited(true);
+      void persistCurrentWeighing({ charge: 0, paid: 0, noCharge: true });
+    } else {
+      setChargeInput("");
+      setChargeManuallyEdited(false);
+      void persistCurrentWeighing({ charge: 0, paid: 0, noCharge: false });
+    }
+  };
+
+  const toggleCancelled = async (row) => {
+    if (!lanConnected || saving) return;
+    const cancelled = !row.cancelled;
+    setSaving(true);
+    try {
+      const saved = normalizeWeighing(await saveWeighing({
+        ...row,
+        cancelled,
+        cancelledAt: cancelled ? new Date().toISOString() : "",
+      }));
+      setRows((current) => current.map((item) => item.id === saved.id ? saved : item));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleRowPaid = async (row, checked) => {
+    if (!lanConnected || saving || row.cancelled) return;
+    const charge = Math.max(0, Number(row.charge ?? row.weigher) || 0);
+    const paid = checked ? charge : 0;
+    setSaving(true);
+    try {
+      const saved = normalizeWeighing(await saveWeighing({
+        ...row,
+        charge,
+        paid,
+        weigher: String(charge),
+        driver: String(paid),
+      }));
+      setRows((current) => current.map((item) => item.id === saved.id ? saved : item));
+      if (selectedId === saved.id) {
+        setPaidInput(paid > 0 ? String(paid) : "");
+        setPaidChecked(checked);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startHistoryColumnResize = (index, event) => {
+    if (index >= HISTORY_COLUMNS.length - 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const table = event.currentTarget.closest("table");
+    const tableWidth = table?.getBoundingClientRect().width || 1;
+    const startX = event.clientX;
+    const startLeft = historyColumnWidths[index];
+    const startRight = historyColumnWidths[index + 1];
+    const pairWidth = startLeft + startRight;
+    const minLeft = HISTORY_COLUMNS[index].min;
+    const minRight = HISTORY_COLUMNS[index + 1].min;
+
+    const handlePointerMove = (moveEvent) => {
+      const delta = ((moveEvent.clientX - startX) / tableWidth) * 100;
+      const left = Math.min(pairWidth - minRight, Math.max(minLeft, startLeft + delta));
+      setHistoryColumnWidths((current) => {
+        const next = [...current];
+        next[index] = Number(left.toFixed(2));
+        next[index + 1] = Number((pairWidth - left).toFixed(2));
+        return next;
+      });
+    };
+    const stopResize = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize, { once: true });
   };
 
   const displayWeight = scaleOpen ? (weightLocked ? lockedWeight : liveWeight) : 0;
@@ -383,11 +645,26 @@ export default function Weighing() {
   const fallbackPricingWeight = captured.gross > 0 && captured.tare > 0
     ? Math.abs(captured.gross - captured.tare)
     : (captured.gross || captured.tare);
-  const fallbackPrice = detailsLocked && totalCharge <= 0
-    ? Number(findAutomaticPrice(priceTiers, form.goods, fallbackPricingWeight))
+  const fallbackPrice = detailsLocked && totalCharge <= 0 && !chargeManuallyEdited
+    ? Math.round(Number(findAutomaticPrice(priceTiers, form.goods, fallbackPricingWeight)))
     : 0;
-  const visibleTotalCharge = totalCharge > 0 ? totalCharge : Math.round(fallbackPrice * 1000);
-  const visibleChargeInput = chargeInput !== "" ? chargeInput : (fallbackPrice > 0 ? String(fallbackPrice) : "");
+  const visibleTotalCharge = noExtraCharge ? 0 : (totalCharge > 0 ? totalCharge : fallbackPrice);
+  const visibleChargeInput = noExtraCharge ? "0" : (chargeInput !== "" ? chargeInput : (fallbackPrice > 0 ? String(fallbackPrice) : ""));
+  const paidAmount = noExtraCharge ? 0 : Math.max(0, Math.round(Number(paidInput) || 0));
+  const debtAmount = Math.max(0, visibleTotalCharge - paidAmount);
+  const statisticsRows = Object.values(rows.filter((row) => !row.cancelled).reduce((groups, row) => {
+    const key = statisticsMode === "customer"
+      ? (row.customer || "Không rõ")
+      : statisticsMode === "plate"
+      ? (row.plate || "Không biển số")
+      : "Tổng thể";
+    if (!groups[key]) groups[key] = { key, count: 0, net: 0, charge: 0, paid: 0 };
+    groups[key].count += 1;
+    groups[key].net += Math.abs(Number(row.net) || 0);
+    groups[key].charge += Math.max(0, Number(row.charge ?? row.weigher) || 0);
+    groups[key].paid += Math.max(0, Number(row.paid ?? row.driver) || 0);
+    return groups;
+  }, {}));
 
   return (
     <main className="scale-page">
@@ -421,7 +698,14 @@ export default function Weighing() {
       <section className="scale-control-panel">
         <div className="scale-fields">
           <Field label="Khách hàng" value={form.customer} disabled={detailsLocked} onChange={(value) => updateField("customer", value)} />
-          <Field label="Biển số xe" value={form.plate} disabled={detailsLocked} onChange={(value) => updateField("plate", value)} />
+          <PlateField
+            plate={form.plate}
+            note={form.plateNote}
+            disabled={detailsLocked}
+            onPlateChange={(value) => updateField("plate", value)}
+            onPlateBlur={() => setForm((current) => ({ ...current, plate: normalizePlate(current.plate) }))}
+            onNoteChange={(value) => updateField("plateNote", value)}
+          />
           <Field
             label="Xuất/Nhập"
             value={form.direction}
@@ -430,53 +714,57 @@ export default function Weighing() {
             onChange={(value) => updateField("direction", value)}
           />
           <Field label="Loại hàng" value={form.goods} disabled={detailsLocked} onChange={(value) => updateField("goods", value)} />
-          <div className="scale-money-row">
+          <div className={`scale-money-row${noExtraCharge ? " is-disabled" : ""}`}>
             <label>Tiền cân</label>
             <div className="scale-money-controls">
               <span className="scale-money-input-wrap">
                 <input
                   type="number"
                   min="0"
-                  step="10"
+                  step="10000"
                   inputMode="numeric"
-                  placeholder="Tiền lần này"
+                  placeholder="Nhập đúng số tiền"
                   value={visibleChargeInput}
                   disabled={noExtraCharge}
-                  onChange={(event) => { setChargeInput(event.target.value); setMoneyMessage(""); }}
+                  onFocus={() => setChargeManuallyEdited(true)}
+                  onChange={(event) => changeCharge(event.target.value)}
+                  onBlur={() => void persistCurrentWeighing({ charge: totalCharge, paid: paidAmount })}
                 />
-                <span>.000đ</span>
+                <span>đ</span>
               </span>
               <label className="scale-money-check"><input type="checkbox" checked={noExtraCharge} onChange={(event) => {
                 const checked = event.target.checked;
-                setNoExtraCharge(checked);
-                setChargeInput(checked ? "0" : "");
-                setMoneyMessage("");
-              }} /> Không thu thêm</label>
+                toggleNoCharge(checked);
+              }} /> Không thu tiền</label>
               <strong>Tổng: {numberText(visibleTotalCharge)}đ</strong>
             </div>
           </div>
-          <div className="scale-money-row">
+          <div className={`scale-money-row${noExtraCharge ? " is-disabled" : ""}`}>
             <label>Thanh toán</label>
             <div className="scale-money-controls">
-              <label className="scale-money-check"><input type="checkbox" checked={paidChecked} onChange={(event) => {
+              <label className="scale-money-check"><input type="checkbox" disabled={noExtraCharge} checked={paidChecked} onChange={(event) => {
                 const checked = event.target.checked;
                 setPaidChecked(checked);
-                if (checked) setPaidInput(String(visibleTotalCharge / 1000));
+                const paid = checked ? visibleTotalCharge : 0;
+                setPaidInput(checked ? String(paid) : "");
+                void persistCurrentWeighing({ charge: visibleTotalCharge, paid });
               }} /> Đã thanh toán</label>
               <span className="scale-money-input-wrap">
                 <input
                   type="number"
                   min="0"
-                  step="10"
+                  step="10000"
                   inputMode="numeric"
                   placeholder="Đã thu"
                   value={paidInput}
-                  onChange={(event) => { setPaidChecked(false); setPaidInput(event.target.value); }}
+                  disabled={noExtraCharge}
+                  onChange={(event) => changePaid(event.target.value)}
+                  onBlur={() => void persistCurrentWeighing({ charge: visibleTotalCharge, paid: paidAmount })}
                 />
-                <span>.000đ</span>
+                <span>đ</span>
               </span>
-              <strong className={Math.max(0, visibleTotalCharge - ((Number(paidInput) || 0) * 1000)) > 0 ? "has-debt" : ""}>
-                Nợ: {numberText(Math.max(0, visibleTotalCharge - ((Number(paidInput) || 0) * 1000)))}đ
+              <strong className={debtAmount > 0 ? "has-debt" : ""}>
+                Nợ: {numberText(debtAmount)}đ
               </strong>
             </div>
           </div>
@@ -493,10 +781,10 @@ export default function Weighing() {
           />
           <div className="scale-weight-actions">
             <button type="button" onClick={startNewWeighing}>Lần cân mới</button>
-            <button type="button" disabled={!lanConnected || saving} onClick={storeCurrentWeighing}>
-              {saving ? "Đang lưu..." : "Lưu số liệu"}
+            <button type="button" disabled={saving || !selectedId} onClick={startAdditionalWeighing}>
+              Cân thêm
             </button>
-            <button type="button">Thống kê</button>
+            <button type="button" onClick={() => setStatisticsOpen(true)}>Thống kê</button>
           </div>
           <div className="scale-serial-settings">
             <label>Baud Rate <select defaultValue="9600"><option>9600</option><option>19200</option></select></label>
@@ -518,7 +806,26 @@ export default function Weighing() {
           <label><input type="radio" name="scale-filter" checked={filter === "pending"} onChange={() => setFilter("pending")} /> Chưa cân</label>
           <label><input type="radio" name="scale-filter" checked={filter === "done"} onChange={() => setFilter("done")} /> Đã cân</label>
           <label><input type="radio" name="scale-filter" checked={filter === "all"} onChange={() => setFilter("all")} /> Tất cả</label>
-          <label className="scale-show-all"><input type="checkbox" defaultChecked /> Hiện tất cả</label>
+          <label className="scale-date-filter">Thời gian
+            <select value={dateFilter} onChange={(event) => setDateFilter(event.target.value)}>
+              <option value="last30">30 ngày gần đây</option>
+              <option value="all">Hiện tất cả</option>
+              <option value="today">Hôm nay</option>
+              <option value="yesterday">Hôm qua</option>
+              <option value="2days">2 ngày trước</option>
+              <option value="3days">3 ngày trước</option>
+              <option value="7days">7 ngày gần đây</option>
+              <option value="month">Tháng này</option>
+              <option value="year">Năm này</option>
+              <option value="custom">Tùy chọn</option>
+            </select>
+          </label>
+          {dateFilter === "custom" && (
+            <div className="scale-custom-dates">
+              <input type="date" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} />
+              <input type="date" value={customTo} onChange={(event) => setCustomTo(event.target.value)} />
+            </div>
+          )}
           <div className="scale-port">
             <span>Cổng COM</span>
             <select defaultValue="COM1"><option>COM1</option><option>COM2</option><option>COM3</option></select>
@@ -527,17 +834,45 @@ export default function Weighing() {
 
         <div className="scale-table-wrap">
           <table className="scale-table">
+            <colgroup>
+              {HISTORY_COLUMNS.map((column, index) => <col key={column.key} style={{ width: `${historyColumnWidths[index]}%` }} />)}
+            </colgroup>
             <thead>
               <tr>
-                <th>STT</th><th>Biển số</th><th>Khối lượng tổng</th><th>Khối lượng bì</th><th>Khối lượng hàng</th>
-                <th>Xuất/Nhập</th><th>Khách hàng</th><th>Loại hàng</th><th>Thời gian tổng</th><th>Thời gian bì</th>
+                {HISTORY_COLUMNS.map((column, index) => (
+                  <th key={column.key}>
+                    {column.label}
+                    {index < HISTORY_COLUMNS.length - 1 && (
+                      <span
+                        className="scale-column-resizer"
+                        role="separator"
+                        aria-label={`Đổi độ rộng cột ${column.label}`}
+                        onPointerDown={(event) => startHistoryColumnResize(index, event)}
+                      />
+                    )}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {visibleRows.map((row) => (
-                <tr key={row.id} className={selectedId === row.id ? "selected" : ""} onClick={() => selectRow(row)}>
-                  <td>{row.id}</td><td>{row.plate}</td><td>{numberText(row.gross)}</td><td>{numberText(row.tare)}</td><td>{numberText(row.net)}</td>
-                  <td>{row.direction}</td><td>{row.customer}</td><td>{row.goods}</td><td>{row.grossAt}</td><td>{row.tareAt}</td>
+                <tr key={row.id} className={`${selectedId === row.id ? "selected " : ""}${row.cancelled ? "is-cancelled" : ""}`} onClick={() => selectRow(row)}>
+                  <td><button type="button" className="scale-cancel-row" onClick={(event) => { event.stopPropagation(); void toggleCancelled(row); }}>{row.cancelled ? "Khôi phục" : "Hủy"}</button></td>
+                  <td>{row.plate}{row.plateNote ? <small>{row.plateNote}</small> : null}</td><td>{row.customer}</td><td>{numberText(row.gross)}</td><td>{numberText(row.tare)}</td>
+                  <td>{formatPrintDate(row.grossAt)}</td><td>{formatPrintDate(row.tareAt)}</td><td>{row.direction}</td><td>{row.goods}</td>
+                  <td>{numberText(row.charge ?? row.weigher)}đ</td>
+                  <td className="scale-paid-cell">
+                    <input
+                      type="checkbox"
+                      aria-label={`Đã thanh toán ${row.plate || row.id}`}
+                      title="Tích để đánh dấu đã thanh toán đủ"
+                      checked={Number(row.charge ?? row.weigher) > 0 && Number(row.paid ?? row.driver) >= Number(row.charge ?? row.weigher)}
+                      disabled={!lanConnected || saving || row.cancelled || Number(row.charge ?? row.weigher) <= 0}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => void toggleRowPaid(row, event.target.checked)}
+                    />
+                  </td>
+                  <td>{numberText(Math.max(0, Number(row.charge ?? row.weigher) - Number(row.paid ?? row.driver)))}đ</td>
                 </tr>
               ))}
             </tbody>
@@ -585,17 +920,44 @@ export default function Weighing() {
           </div>
         </div>
       )}
+      {statisticsOpen && (
+        <div className="scale-price-overlay" role="dialog" aria-modal="true" aria-label="Thống kê cân xe">
+          <div className="scale-statistics-dialog">
+            <div className="scale-statistics-head">
+              <h3>THỐNG KÊ CÂN XE</h3>
+              <button type="button" onClick={() => setStatisticsOpen(false)}>Đóng</button>
+            </div>
+            <div className="scale-statistics-tabs">
+              <button type="button" className={statisticsMode === "overall" ? "active" : ""} onClick={() => setStatisticsMode("overall")}>Tổng thể</button>
+              <button type="button" className={statisticsMode === "customer" ? "active" : ""} onClick={() => setStatisticsMode("customer")}>Theo khách</button>
+              <button type="button" className={statisticsMode === "plate" ? "active" : ""} onClick={() => setStatisticsMode("plate")}>Theo biển số xe</button>
+            </div>
+            <div className="scale-statistics-table-wrap">
+              <table className="scale-statistics-table">
+                <thead><tr><th>Nhóm</th><th>Số lượt</th><th>Khối lượng hàng</th><th>Tổng tiền cân</th><th>Đã thu</th><th>Xe đang nợ</th></tr></thead>
+                <tbody>
+                  {statisticsRows.map((item) => (
+                    <tr key={item.key}>
+                      <td>{item.key}</td><td>{item.count}</td><td>{numberText(item.net)} kg</td><td>{numberText(item.charge)}đ</td><td>{numberText(item.paid)}đ</td><td className={item.charge > item.paid ? "has-debt" : ""}>{numberText(Math.max(0, item.charge - item.paid))}đ</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
       {priceTableOpen && (
         <div className="scale-price-overlay" role="dialog" aria-modal="true" aria-label="Bảng giá cân theo tấn">
           <div className="scale-price-dialog">
             <h3>BẢNG GIÁ CÂN THEO TẤN</h3>
-            <div className="scale-price-table-head"><span>Loại xe/nhóm</span><span>Đến (tấn)</span><span>Giá (30 = 30.000đ)</span><span></span></div>
+            <div className="scale-price-table-head"><span>Loại xe/nhóm</span><span>Đến (tấn)</span><span>Giá (đồng)</span><span></span></div>
             <div className="scale-price-table-body">
               {priceTiers.map((tier, index) => (
                 <div className="scale-price-tier" key={index}>
                   <input type="text" placeholder="Tên loại" value={tier.name || ""} onChange={(event) => setPriceTiers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} />
                   <input type="number" min="0" step="1" value={tier.maxTons} onChange={(event) => setPriceTiers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, maxTons: event.target.value } : item))} />
-                  <input type="number" min="0" step="10" placeholder="Nhập giá" value={tier.price} onChange={(event) => setPriceTiers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, price: event.target.value } : item))} />
+                  <input type="number" min="0" step="10000" placeholder="Ví dụ 30000" value={tier.price} onChange={(event) => setPriceTiers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, price: event.target.value } : item))} />
                   <button type="button" aria-label="Xóa mức giá" onClick={() => setPriceTiers((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button>
                 </div>
               ))}
@@ -653,7 +1015,7 @@ function ScalePrintTicket({ ticketNumber, form, captured, preview = false }) {
           <p><span>Loại hàng:</span><strong>{form.goods || ""}</strong></p>
         </div>
         <div className="scale-print-detail-column">
-          <p><span>Biển số xe:</span><strong>{form.plate || ""}</strong></p>
+          <p><span>Biển số xe:</span><strong>{form.plate || ""}{form.plateNote ? ` • ${form.plateNote}` : ""}</strong></p>
           <p><span>Xuất/Nhập:</span><strong>{form.direction || ""}</strong></p>
           <p><span>Ngày cân tổng:</span><strong>{formatPrintDate(captured.grossAt)}</strong></p>
           <p><span>Ngày cân bì:</span><strong>{formatPrintDate(captured.tareAt)}</strong></p>
@@ -696,6 +1058,19 @@ function TicketBarcode({ value }) {
   }
 
   return <svg className="scale-print-barcode" viewBox={`0 0 ${x} 24`} role="img" aria-label={`Mã vạch phiếu ${value}`}>{bars}</svg>;
+}
+
+function PlateField({ plate, note, onPlateChange, onPlateBlur, onNoteChange, disabled = false }) {
+  return (
+    <div className="scale-field-row scale-plate-row">
+      <label>Biển số xe</label>
+      <div className="scale-plate-inputs">
+        <input value={plate} disabled={disabled} placeholder="37S 1234" onChange={(event) => onPlateChange(event.target.value)} onBlur={onPlateBlur} />
+        <input value={note} disabled={disabled} placeholder="Rơ-moóc / ghi chú" onChange={(event) => onNoteChange(event.target.value)} />
+      </div>
+      <button type="button" disabled={disabled}>Tìm</button>
+    </div>
+  );
 }
 
 function Field({ label, value, onChange, options, disabled = false }) {

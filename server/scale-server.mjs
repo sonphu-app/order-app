@@ -38,8 +38,22 @@ database.exec(`
   );
 `);
 
+const existingColumns = new Set(database.prepare("PRAGMA table_info(weighings)").all().map((column) => column.name));
+const ensureColumn = (name, definition) => {
+  if (!existingColumns.has(name)) database.exec(`ALTER TABLE weighings ADD COLUMN ${name} ${definition}`);
+};
+ensureColumn("plate_note", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("charge", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("paid", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("no_charge", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("cancelled", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("cancelled_at", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("series_id", "TEXT NOT NULL DEFAULT ''");
+
 const listWeighings = database.prepare(`
-  SELECT id, plate, customer, direction, goods, weigher, driver,
+  SELECT id, plate, plate_note AS plateNote, customer, direction, goods, weigher, driver,
+         charge, paid, no_charge AS noCharge, cancelled, cancelled_at AS cancelledAt,
+         series_id AS seriesId,
          gross, tare, net, gross_at AS grossAt, tare_at AS tareAt,
          created_at AS createdAt, updated_at AS updatedAt
   FROM weighings
@@ -49,13 +63,15 @@ const listWeighings = database.prepare(`
 
 const insertWeighing = database.prepare(`
   INSERT INTO weighings (
-    plate, customer, direction, goods, weigher, driver,
+    plate, plate_note, customer, direction, goods, weigher, driver,
+    charge, paid, no_charge, cancelled, cancelled_at, series_id,
     gross, tare, net, gross_at, tare_at, created_at, updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const updateWeighing = database.prepare(`
   UPDATE weighings SET
-    plate = ?, customer = ?, direction = ?, goods = ?, weigher = ?, driver = ?,
+    plate = ?, plate_note = ?, customer = ?, direction = ?, goods = ?, weigher = ?, driver = ?,
+    charge = ?, paid = ?, no_charge = ?, cancelled = ?, cancelled_at = ?, series_id = ?,
     gross = ?, tare = ?, net = ?, gross_at = ?, tare_at = ?, updated_at = ?
   WHERE id = ?
 `);
@@ -153,9 +169,13 @@ function saveRecord(input) {
   const gross = toInteger(input.gross);
   const tare = toInteger(input.tare);
   const net = Number.isFinite(Number(input.net)) ? toInteger(input.net) : gross - tare;
+  const charge = Math.max(0, toInteger(input.charge ?? input.weigher));
+  const paid = Math.max(0, toInteger(input.paid ?? input.driver));
   const values = [
-    String(input.plate || ""), String(input.customer || ""), String(input.direction || ""),
-    String(input.goods || ""), String(input.weigher || ""), String(input.driver || ""),
+    String(input.plate || ""), String(input.plateNote || ""), String(input.customer || ""), String(input.direction || ""),
+    String(input.goods || ""), String(charge), String(paid),
+    charge, paid, input.noCharge ? 1 : 0, input.cancelled ? 1 : 0,
+    String(input.cancelledAt || ""), String(input.seriesId || ""),
     gross, tare, net, String(input.grossAt || ""), String(input.tareAt || ""),
   ];
   const requestedId = toInteger(input.id);
