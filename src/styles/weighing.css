@@ -382,6 +382,32 @@
   font-size: 24px;
 }
 
+@media screen and (max-height: 820px) and (min-width: 761px) {
+  .scale-page { padding: 4px; }
+  .scale-display-row { gap: 6px; margin-bottom: 4px; }
+  .scale-led-panel,
+  .scale-unit,
+  .scale-clock { min-height: 104px; border-width: 3px; }
+  .scale-led-panel { padding: 0 14px; }
+  .scale-led-digits { height: 92px; }
+  .seven-digit { height: 90px; flex-basis: clamp(42px, 5.3vw, 66px); }
+  .scale-stability { font-size: 52px; }
+  .scale-unit { font-size: 52px; }
+  .scale-clock strong { margin-bottom: 3px; font-size: 24px; }
+  .scale-clock { font-size: 18px; }
+  .scale-clock small { margin-top: 2px; }
+  .scale-clock button { margin-top: 3px; }
+  .scale-control-panel { gap: 5px; padding: 5px; }
+  .scale-fields { padding: 4px; }
+  .scale-field-row { min-height: 28px; }
+  .scale-money-row { min-height: 31px; }
+  .scale-weight-box { padding: 4px 2px; }
+  .scale-weight-row { margin-bottom: 4px; }
+  .scale-serial-settings { margin-top: 4px; }
+  .scale-history-panel { margin-top: 4px; padding: 4px; }
+  .scale-footer { display: none; }
+}
+
 .scale-print-sheet { display: none; }
 
 @media screen {
