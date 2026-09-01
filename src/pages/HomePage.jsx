@@ -988,7 +988,9 @@ const toggleWarehouse = async (id, warehouse) => {
             boxShadow: "0 0 0 3px rgba(46,204,113,.18), 0 6px 14px rgba(0,0,0,.35)",
           } : {}),
         }}
-        onClick={() => navigate(`/order/${o.id}`)}
+        onClick={() => {
+          if (o.id !== APP_UPDATE_TASK_ID) navigate(`/order/${o.id}`);
+        }}
       >
         <div style={hasOrderPanel ? { display: "grid", gridTemplateColumns: "minmax(0, 1fr) clamp(118px, 22vw, 200px)", gap: 10 } : undefined}>
         <div
