@@ -1,11 +1,13 @@
 import { supabase } from "../supabaseClient";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { getCurrentUser, getUsers, refreshCurrentUser } from "../utils/auth";
 import OrderActions from "../components/OrderActions";
 import {
   deleteLocal,
   getAllLocal,
+  getLocalById,
+  getLocalOrderImages,
   publishSyncEvent,
   putLocal,
   putManyLocal,
@@ -13,6 +15,11 @@ import {
 import { createImagePreviewBlob } from "../utils/imagePreview";
 import { getClipboardImageFiles } from "../utils/clipboardImages";
 import CachedImage from "../components/CachedImage";
+import MentionTextarea from "../components/MentionTextarea";
+import { notifyMention } from "../utils/mentions";
+import { hasPermission, PERMISSIONS } from "../utils/permissions";
+import { createUuid } from "../utils/uuid";
+import { cleanMoneyInput, formatMoneyInput, parseMoneyInput } from "../utils/moneyInput";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
 
@@ -21,6 +28,13 @@ function getLocalImageSource(row) {
   // Data URLs are created locally while uploading. Other local_image_url values
   // may be stale object URLs after a page reload, so use the durable public URL.
   return local.startsWith("data:") ? local : row?.image_url;
+}
+
+function touchDistance(touches) {
+  if (!touches || touches.length < 2) return 0;
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
 }
 
 export default function OrderDetail() {
@@ -34,15 +48,19 @@ const getName = (id) => {
 };
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const me = getCurrentUser();
 
   const [order, setOrder] = useState(null);
-const [orderShrinkProgress, setOrderShrinkProgress] = useState(0);
 const bodyRef = useRef(null);
 const inputRef = useRef(null);
 const realtimeReadyRef = useRef(false);
 const initialChatScrollRef = useRef(false);
 const [images, setImages] = useState([]);
+
+function sameImageList(left = [], right = []) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
 
   // CHAT
   const [messages, setMessages] = useState([]);
@@ -50,20 +68,31 @@ const [images, setImages] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyRows, setHistoryRows] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [accountingChecking, setAccountingChecking] = useState(false);
+  const [detailTab, setDetailTab] = useState("order");
+  const [paymentBreakdown, setPaymentBreakdown] = useState({ cash: [], bank: [], note: "" });
+  const [paymentDraft, setPaymentDraft] = useState({ cash: [{ id: "cash-draft", amount: "", note: "" }], bank: [{ id: "bank-draft", amount: "", note: "" }] });
+  const [editingPaymentNote, setEditingPaymentNote] = useState(null);
+  const [editingPaymentNoteValue, setEditingPaymentNoteValue] = useState("");
 
   // IMAGE VIEWER (AN TOÀN)
   const [viewerIndex, setViewerIndex] = useState(-1); // -1 = đóng
   const [viewerImageSrc, setViewerImageSrc] = useState("");
   const [viewerZoom, setViewerZoom] = useState(1);
+  const [viewerPan, setViewerPan] = useState({ x: 0, y: 0 });
   const [chatViewerZoom, setChatViewerZoom] = useState(1);
+  const [chatViewerPan, setChatViewerPan] = useState({ x: 0, y: 0 });
 
-  const orderTopRef = useRef(null);
   const bottomRef = useRef(null);
 const [editIndex, setEditIndex] = useState(-1);
 // VIEWER cho ảnh trong CHAT
 const [chatViewer, setChatViewer] = useState(null); 
 const [chatViewerImageSrc, setChatViewerImageSrc] = useState("");
 const viewerTouchRef = useRef(null);
+const viewerPinchRef = useRef({ distance: 0, zoom: 1 });
+const viewerPanGestureRef = useRef(null);
+const chatViewerPanGestureRef = useRef(null);
 const imageViewerHistoryRef = useRef(null);
 // null | { imgs: string[], i: number }
 
@@ -76,6 +105,8 @@ function closeImageViewer() {
   setChatViewerImageSrc("");
   setViewerZoom(1);
   setChatViewerZoom(1);
+  setViewerPan({ x: 0, y: 0 });
+  setChatViewerPan({ x: 0, y: 0 });
   if (wasOpen) window.history.back();
 }
 
@@ -89,6 +120,7 @@ function openOrderViewer(index) {
   setViewerIndex(index);
   setViewerImageSrc(source);
   setViewerZoom(1);
+  setViewerPan({ x: 0, y: 0 });
 }
 
 function openChatViewer(imageList, index) {
@@ -101,12 +133,21 @@ function openChatViewer(imageList, index) {
   setChatViewer({ imgs: imageList, i: index });
   setChatViewerImageSrc(source);
   setChatViewerZoom(1);
+  setChatViewerPan({ x: 0, y: 0 });
 }
 
-const handleChatScroll = (e) => {
-  const top = e.currentTarget.scrollTop;
-  setOrderShrinkProgress(Math.min(1, Math.max(0, top / 180)));
-};
+function updateViewerZoom(value) {
+  const next = Math.min(4, Math.max(1, value));
+  setViewerZoom(next);
+  if (next === 1) setViewerPan({ x: 0, y: 0 });
+}
+
+function updateChatViewerZoom(value) {
+  const next = Math.min(4, Math.max(1, value));
+  setChatViewerZoom(next);
+  if (next === 1) setChatViewerPan({ x: 0, y: 0 });
+}
+
 useEffect(() => {
   const run = async () => {
     await refreshCurrentUser();
@@ -117,65 +158,58 @@ useEffect(() => {
   run();
 }, []);
 
-  /* ================= LOAD ORDER ================= */
-const loadOrder = async ({ remote = true } = {}) => {
-  const localOrders = await getAllLocal("orders");
-  const localOrder = localOrders.find((item) => String(item.id) === String(id));
-  const localImages = (await getAllLocal("orderImages"))
-    .filter((item) => String(item.order_id) === String(id));
+ /* ================= LOAD ORDER ================= */
+ const loadOrder = async ({ remote = true } = {}) => {
+  const localOrder = await getLocalById("orders", id);
+  const localImages = await getLocalOrderImages(id);
+  const localImageSources = localImages.map(getLocalImageSource);
   if (localOrder) {
-    setOrder({
-      ...localOrder,
-      images: localImages.map(getLocalImageSource),
-    });
+    setPaymentBreakdown(localOrder.payment_breakdown || { cash: [], bank: [], note: "" });
+    setOrder((current) => current && sameImageList(current.images || [], localImageSources)
+      && Object.keys(localOrder).every((key) => current[key] === localOrder[key])
+      ? current
+      : { ...localOrder, images: localImageSources });
   }
 
   if (!remote) return;
 
   // 1. lấy order
-  const { data, error } = await supabase
-    .from("orders")
-    .select("*")
-    .eq("id", id)
-    .single();
+  const [{ data, error }, { data: orderImgs, error: imgErr }] = await Promise.all([
+    supabase.from("orders").select("*").eq("id", id).single(),
+    supabase.from("order_images").select("*").eq("order_id", id).order("created_at", { ascending: true }),
+  ]);
 
   if (error) {
     console.log("LOAD ORDER ERROR:", error);
     if (!localOrder) return;
   }
   if (data) await putLocal("orders", data);
-  if (data) {
-    setOrder({
-      ...data,
-      images: localImages.map(getLocalImageSource),
-    });
-  }
-
-  // 2. lấy ảnh của order
-  const { data: orderImgs, error: imgErr } = await supabase
-    .from("order_images")
-    .select("*")
-    .eq("order_id", id)
-    .order("created_at", { ascending: true });
-
   if (imgErr) {
     console.log("LOAD ORDER IMAGES ERROR:", imgErr);
   }
 
-  // 3. gộp lại
+  // Một phản hồi ảnh thành công là dữ liệu chuẩn; lỗi mạng giữ nguyên cache.
   const localImageById = new Map(localImages.map((row) => [String(row.id), row]));
   const remoteImages = (orderImgs || []).map((row) => ({
     ...row,
     local_image_url: localImageById.get(String(row.id))?.local_image_url,
   }));
-  await putManyLocal("orderImages", remoteImages);
-  // A successful remote response is authoritative, so removed images do not
-  // remain visible from an older local cache. Keep local rows only on error.
-  const mergedImageRows = imgErr ? localImages : remoteImages;
-  setOrder({
-    ...(data || localOrder),
-    images: mergedImageRows.map(getLocalImageSource),
-  });
+  if (!imgErr) {
+    const remoteIds = new Set(remoteImages.map((row) => String(row.id)));
+    await Promise.all(localImages.filter((row) => !remoteIds.has(String(row.id))).map((row) => deleteLocal("orderImages", row.id)));
+    await putManyLocal("orderImages", remoteImages);
+  }
+  const nextOrder = { ...(data || localOrder), images: (imgErr ? localImageSources : remoteImages.map(getLocalImageSource)) };
+  if (nextOrder.id) {
+    setOrder((current) => {
+      const currentImages = current?.images || [];
+      const orderChanged = !current || Object.keys(nextOrder).some((key) => key !== "images" && current[key] !== nextOrder[key]);
+      return orderChanged || !sameImageList(currentImages, nextOrder.images) ? nextOrder : current;
+    });
+    setPaymentBreakdown((current) => JSON.stringify(current) === JSON.stringify(nextOrder.payment_breakdown || { cash: [], bank: [], note: "" })
+      ? current
+      : (nextOrder.payment_breakdown || { cash: [], bank: [], note: "" }));
+  }
 };
 
 const scrollToLatestOnce = () => {
@@ -185,7 +219,6 @@ const scrollToLatestOnce = () => {
     requestAnimationFrame(() => {
       if (!bodyRef.current) return;
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-      setOrderShrinkProgress(Math.min(1, Math.max(0, bodyRef.current.scrollTop / 180)));
     });
   });
 };
@@ -323,6 +356,7 @@ useEffect(() => {
         }
         putLocal("orders", payload.new);
         setOrder((current) => ({ ...current, ...payload.new }));
+        if (payload.new.payment_breakdown) setPaymentBreakdown(payload.new.payment_breakdown);
       }
     )
     .on(
@@ -333,6 +367,9 @@ useEffect(() => {
           deleteLocal("orderMessages", payload.old.id);
           setMessages((current) => current.filter((item) => item.id !== payload.old.id));
           return;
+        }
+        if (payload.eventType === "INSERT" && payload.new?.sender_id !== me?.id) {
+          notifyMention({ id: `order-message-${payload.new.id}`, text: payload.new.text, title: "Tin nhắn đơn có tag bạn", body: "Có tin nhắn trong đơn nhắc đến bạn" });
         }
         putLocal("orderMessages", payload.new);
         setMessages((current) => {
@@ -477,7 +514,12 @@ useEffect(() => {
         .eq("id", m.id)
         .select("*")
         .single();
-      if (updated) await putLocal("orderMessages", updated);
+      if (updated) {
+        await putLocal("orderMessages", updated);
+        setMessages((current) => current.map((message) => (
+          message.id === updated.id ? { ...message, seen_by: updated.seen_by } : message
+        )));
+      }
     }));
     window.dispatchEvent(new CustomEvent("order-messages-seen", { detail: { orderId: id } }));
   };
@@ -486,23 +528,20 @@ useEffect(() => {
 }, [messages, me?.id]);
 
   if (!order) return null;
+  const canViewPayment = hasPermission(PERMISSIONS.VIEW_ACCOUNTING);
+  const canDeletePayment = hasPermission(PERMISSIONS.DELETE_PAYMENT_AND_WITHDRAWAL);
+  const paymentRows = (kind) => {
+    const rows = paymentBreakdown[kind] || [];
+    return rows.filter((row) => cleanMoneyInput(row.amount));
+  };
+  const paymentDraftRows = (kind) => {
+    const rows = paymentDraft[kind] || [];
+    return rows.length ? rows : [{ id: `${kind}-draft`, amount: "", note: "" }];
+  };
+  const paymentTotal = (kind) => (paymentBreakdown[kind] || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const viewedUserIds = [...new Set(messages.flatMap((message) => Array.isArray(message.seen_by) ? message.seen_by : []))];
+  const viewedUserNames = viewedUserIds.map(getName).filter(Boolean);
   const orderDisplayTitle = order.customer_name || order.title || "";
-  const shrink = orderShrinkProgress;
-  const adaptiveOrderBoxStyle = {
-    padding: `${12 - (4 * shrink)}px`,
-    maxHeight: `${900 - (750 * shrink)}px`,
-  };
-  const adaptiveOrderTextStyle = {
-    fontSize: `${22 - (5 * shrink)}px`,
-    lineHeight: 1.62 - (0.17 * shrink),
-  };
-  const adaptiveOrderTitleStyle = {
-    fontSize: `${23 - (4 * shrink)}px`,
-  };
-  const adaptiveOrderImageStyle = {
-    width: `${120 - (64 * shrink)}px`,
-    height: `${120 - (64 * shrink)}px`,
-  };
 
   /* ================= CHAT ================= */
   async function sendMessage() {
@@ -510,7 +549,7 @@ useEffect(() => {
 
   const outgoingText = text.trim();
   const outgoingImages = [...images];
-  const optimisticId = `local-${crypto.randomUUID()}`;
+  const optimisticId = `local-${createUuid()}`;
   const optimisticMessage = {
     id: optimisticId,
     order_id: id,
@@ -713,6 +752,138 @@ useEffect(() => {
     addSelectedImages(pastedImages);
   }
 
+  const markAccountingChecked = async () => {
+    if (!order || order.accounting_checked || accountingChecking) return;
+    const total = Math.max(0, Math.round(parseMoneyInput(window.prompt("Nhập đầy đủ tổng tiền", formatMoneyInput(order.payment_breakdown?.total_amount || "")) || "")));
+    if (!total) return;
+    setAccountingChecking(true);
+    const checkedAt = new Date().toISOString();
+    const checkedByName = me?.name || me?.username || "";
+    const { data, error } = await supabase.from("orders").update({
+      accounting_checked: true,
+      accounting_checked_at: checkedAt,
+      accounting_checked_by_name: checkedByName,
+      payment_breakdown: { ...(order.payment_breakdown || {}), total_amount: total, total_amount_at: checkedAt },
+    }).eq("id", order.id).select("*").single();
+    setAccountingChecking(false);
+    if (error) {
+      window.alert(`Không thể ghi trạng thái đã kiểm tra: ${error.message}`);
+      return;
+    }
+    if (data) {
+      setOrder((current) => ({ ...current, ...data }));
+      await putLocal("orders", data);
+    }
+    navigate("/expenses/report", { replace: true, state: { view: location.state?.accountingView || "orders" } });
+  };
+
+  const cancelAccountingOrder = async () => {
+    if (!order || order.accounting_cancelled || !hasPermission(PERMISSIONS.VIEW_ACCOUNTING)) return;
+    if (!window.confirm("Bạn muốn hủy đơn này?")) return;
+    const cancelledAt = new Date().toISOString();
+    const payload = {
+      accounting_cancelled: true,
+      accounting_cancelled_at: cancelledAt,
+      accounting_cancelled_by_name: me?.name || me?.username || "",
+      accounting_checked: false,
+      accounting_checked_at: null,
+      accounting_checked_by_name: null,
+      // Hủy đơn phải đồng thời loại toàn bộ khoản thu và tổng tiền khỏi tài chính.
+      payment_breakdown: {
+        cash: [],
+        bank: [],
+        note: order.payment_breakdown?.note || "",
+        cancelled: true,
+        cancelled_at: cancelledAt,
+        cancelled_by_name: me?.name || me?.username || "",
+      },
+    };
+    const { data, error } = await supabase.from("orders").update(payload).eq("id", order.id).select("*").single();
+    if (error) {
+      window.alert(`Không thể hủy đơn trong Kế toán: ${error.message}`);
+      return;
+    }
+    const nextOrder = data || { ...order, ...payload };
+    setOrder(nextOrder);
+    setPaymentBreakdown(nextOrder.payment_breakdown || { cash: [], bank: [], note: "" });
+    await putLocal("orders", nextOrder);
+  };
+
+  const updatePaymentRows = (kind, updater) => {
+    setPaymentDraft((current) => ({
+      ...current,
+      [kind]: typeof updater === "function" ? updater(current[kind] || []) : updater,
+    }));
+  };
+
+  const savePaymentKind = async (kind) => {
+    const draftRows = (paymentDraft[kind] || []).filter((row) => cleanMoneyInput(row.amount));
+    if (!draftRows.length) {
+      window.alert(`Nhập số tiền ${kind === "cash" ? "tiền mặt" : "tài khoản"} trước khi lưu.`);
+      return;
+    }
+    const nextRows = [
+      ...(paymentBreakdown[kind] || []),
+      ...draftRows.map((row) => ({ id: row.id || createUuid(), amount: cleanMoneyInput(row.amount), note: row.note || "", paid_at: new Date().toISOString() })),
+    ];
+    const nonEmptyRows = (rows) => rows.filter((row) => cleanMoneyInput(row.amount));
+    const payload = {
+      cash: kind === "cash" ? nonEmptyRows(nextRows) : nonEmptyRows(paymentBreakdown.cash || []),
+      bank: kind === "bank" ? nonEmptyRows(nextRows) : nonEmptyRows(paymentBreakdown.bank || []),
+      note: paymentBreakdown.note || "",
+      // Thêm phiếu thu không được làm mất tổng tiền đã xác nhận ở kế toán.
+      ...(paymentBreakdown.total_amount > 0 ? {
+        total_amount: paymentBreakdown.total_amount,
+        total_amount_at: paymentBreakdown.total_amount_at || null,
+      } : {}),
+    };
+    const { data, error } = await supabase.from("orders").update({ payment_breakdown: payload }).eq("id", order.id).select("*").single();
+    if (error) {
+      window.alert(`Không thể lưu thanh toán: ${error.message}`);
+      return;
+    }
+    setPaymentBreakdown(payload);
+    setPaymentDraft((current) => ({ ...current, [kind]: [{ id: `${kind}-draft-${Date.now()}`, amount: "", note: "" }] }));
+    setOrder((current) => ({ ...current, ...(data || {}), payment_breakdown: payload }));
+    await putLocal("orders", data || { ...order, payment_breakdown: payload });
+  };
+
+  const updateSavedPaymentNote = async (kind, rowId, note) => {
+    const nextBreakdown = {
+      ...paymentBreakdown,
+      [kind]: (paymentBreakdown[kind] || []).map((row) => row.id === rowId ? { ...row, note } : row),
+    };
+    const { data, error } = await supabase.from("orders").update({ payment_breakdown: nextBreakdown }).eq("id", order.id).select("*").single();
+    if (error) {
+      window.alert(`Không thể lưu ghi chú thanh toán: ${error.message}`);
+      return;
+    }
+    setPaymentBreakdown(nextBreakdown);
+    setOrder((current) => ({ ...current, ...(data || {}), payment_breakdown: nextBreakdown }));
+    await putLocal("orders", data || { ...order, payment_breakdown: nextBreakdown });
+  };
+
+  const removeSavedPayment = async (kind, rowId) => {
+    if (!hasPermission(PERMISSIONS.VIEW_ACCOUNTING)) return;
+    const payload = {
+      cash: kind === "cash" ? (paymentBreakdown.cash || []).filter((row) => row.id !== rowId) : (paymentBreakdown.cash || []),
+      bank: kind === "bank" ? (paymentBreakdown.bank || []).filter((row) => row.id !== rowId) : (paymentBreakdown.bank || []),
+      note: paymentBreakdown.note || "",
+      ...(paymentBreakdown.total_amount > 0 ? {
+        total_amount: paymentBreakdown.total_amount,
+        total_amount_at: paymentBreakdown.total_amount_at || null,
+      } : {}),
+    };
+    const { data, error } = await supabase.from("orders").update({ payment_breakdown: payload }).eq("id", order.id).select("*").single();
+    if (error) {
+      window.alert(`Không thể xóa thanh toán: ${error.message}`);
+      return;
+    }
+    setPaymentBreakdown(payload);
+    setOrder((current) => ({ ...current, ...(data || {}), payment_breakdown: payload }));
+    await putLocal("orders", data || { ...order, payment_breakdown: payload });
+  };
+
   /* ================= RENDER ================= */
   return (
     <div style={S.page} onPaste={handlePasteImages}>
@@ -746,8 +917,41 @@ useEffect(() => {
         <OrderActions
   order={order}
   compact
-  onUpdated={(updated) => setOrder(updated)}
+  onUpdated={(updated) => {
+    const completedNow = order.status !== "completed" && updated.status === "completed";
+    setOrder(updated);
+    if (completedNow) {
+      const fromHome = location.state?.fromHome;
+      navigate("/", {
+        replace: true,
+        state: fromHome ? { restoreHomeView: fromHome } : { statusTab: "completed", focusOrderId: updated.id },
+      });
+    }
+  }}
         />
+        {location.state?.fromAccounting && hasPermission(PERMISSIONS.CHECK_ACCOUNTING_ORDER) && <button
+          type="button"
+          style={S.accountingCheckButton}
+          disabled={order.accounting_checked || accountingChecking}
+          onClick={(event) => { event.stopPropagation(); void markAccountingChecked(); }}
+        >{order.accounting_checked ? "Đã kiểm tra" : accountingChecking ? "Đang ghi…" : "Đã kiểm tra"}</button>}
+        {hasPermission(PERMISSIONS.VIEW_ACCOUNTING) && <button
+          type="button"
+          style={{ ...S.accountingCancelButton, ...(order.accounting_cancelled ? S.accountingCancelButtonDone : {}) }}
+          disabled={order.accounting_cancelled}
+          onClick={(event) => { event.stopPropagation(); void cancelAccountingOrder(); }}
+        >{order.accounting_cancelled ? "Đơn đã hủy" : "Hủy đơn"}</button>}
+        <button
+          type="button"
+          style={S.refreshButton}
+          disabled={refreshing}
+          onClick={async (event) => {
+            event.stopPropagation();
+            setRefreshing(true);
+            try { await Promise.all([loadOrder(), loadChat({ full: true })]); }
+            finally { setRefreshing(false); }
+          }}
+        >{refreshing ? "Đang tải…" : "↻ Làm mới"}</button>
         </div>
         <div style={S.sub}>
           Tạo bởi: {order.created_by_name || "Không rõ"} • {new Date(order.created_at).toLocaleString()}
@@ -755,23 +959,25 @@ useEffect(() => {
           {order.delivered_by_name && <> | Đã giao: {order.delivered_by_name} • {new Date(order.delivered_at || order.updated_at).toLocaleString()}</>}
           {order.completed_by_name && <> | Hoàn thành: {order.completed_by_name} • {new Date(order.completed_at || order.updated_at).toLocaleString()}</>}
         </div>
+        <div style={S.sub}>
+          Đã xem đơn: {viewedUserNames.length ? [...new Set(viewedUserNames)].join(", ") : "Chưa có thông tin"}
+        </div>
       </div>
 
       {/* ===== BODY ===== */}
       <div
         style={S.body}
+        hidden={detailTab !== "order"}
         ref={bodyRef}
-        onScroll={handleChatScroll}
       >
 
         {/* ===== ORDER CONTENT ===== */}
         <div style={S.orderMessageRow}>
         <div
-          ref={orderTopRef}
-          style={{ ...S.orderBox, ...adaptiveOrderBoxStyle }}
+          style={S.orderBox}
         >
-          <div style={{ ...S.orderText, ...adaptiveOrderTextStyle }}>
-  <div style={{ ...S.orderTitleInside, ...adaptiveOrderTitleStyle }}>
+          <div style={S.orderText}>
+  <div style={S.orderTitleInside}>
     {(!order.type || order.type === "normal") && order.pinned && order.status === "new" && (
       <span style={S.priorityInlineLabel}>⭐ ĐƠN ƯU TIÊN</span>
     )}
@@ -793,7 +999,7 @@ useEffect(() => {
     key={`${i}-${img}`}
     src={img}
     alt=""
-    style={{ ...S.orderImg, ...adaptiveOrderImageStyle }}
+    style={S.orderImg}
     onClick={(e) => {
       e.stopPropagation();
       openOrderViewer(i);
@@ -904,7 +1110,7 @@ useEffect(() => {
       </div>
 
       {/* ===== INPUT ===== */}
-<div style={S.inputBar}>
+<div style={{ ...S.inputBar, display: detailTab === "order" ? "block" : "none" }}>
 
   {/* PREVIEW ẢNH */}
   {images.length > 0 && (
@@ -943,8 +1149,9 @@ useEffect(() => {
 
   {/* TEXTAREA + BUTTON */}
   <div style={S.inputMain}>
-    <textarea
-      ref={inputRef}
+    <MentionTextarea
+      inputRef={inputRef}
+      users={users}
       value={text}
       onChange={e => setText(e.target.value)}
       onKeyDown={handleKey}
@@ -966,9 +1173,58 @@ useEffect(() => {
 
 </div>
 
+      {canViewPayment && (
+        <section style={{ ...S.paymentPanel, display: detailTab === "payment" ? "block" : "none" }} aria-label="Thanh toán">
+          <h2 style={S.paymentTitle}>Thanh toán</h2>
+          <div style={S.paymentColumns}>
+          {[["cash", "Tiền mặt"], ["bank", "Tài khoản"]].map(([kind, label]) => (
+            <div key={kind} style={S.paymentGroup}>
+              <strong style={S.paymentGroupTitle}>{label}</strong>
+              {paymentRows(kind).map((row, index) => (
+                <div key={row.id || `saved-${index}`} style={S.paymentSavedEntry}>
+                  <div style={S.paymentSavedLine}>
+                    <span>{formatMoneyInput(row.amount)}đ</span>
+                    {canDeletePayment && <button type="button" onClick={() => void removeSavedPayment(kind, row.id)} style={S.paymentRemove} aria-label={`Xóa dòng ${label}`}>×</button>}
+                  </div>
+                  <small>Thanh toán lúc {new Date(row.paid_at || order.created_at || 0).toLocaleString("vi-VN")}</small>
+                  {kind === "bank" && <small>Đơn của ngày {new Date(order.created_at || 0).toLocaleDateString("vi-VN")}</small>}
+                  {editingPaymentNote === `${kind}:${row.id}` ? <input autoFocus value={editingPaymentNoteValue} onChange={(event) => { setEditingPaymentNoteValue(event.target.value); setPaymentBreakdown((current) => ({ ...current, [kind]: (current[kind] || []).map((item) => item.id === row.id ? { ...item, note: event.target.value } : item) })); }} onBlur={() => { setEditingPaymentNote(null); void updateSavedPaymentNote(kind, row.id, editingPaymentNoteValue); }} placeholder="Ghi chú dòng thanh toán" style={S.paymentRowNote} /> : <div style={{ display: "flex", alignItems: "center", gap: 6 }}><small>{row.note || "Chưa có ghi chú"}</small><button type="button" onClick={() => { setEditingPaymentNote(`${kind}:${row.id}`); setEditingPaymentNoteValue(row.note || ""); }} style={{ border: 0, background: "transparent", color: "#7a4b12", cursor: "pointer", padding: 2 }} aria-label="Sửa ghi chú">✎</button></div>}
+                </div>
+              ))}
+              <div style={S.paymentDraftLabel}>Nhập thêm {label.toLowerCase()}</div>
+              {paymentDraftRows(kind).map((row, index) => (
+                <div key={row.id || index} style={S.paymentEntry}>
+                  <div style={S.paymentLine}>
+                    <input inputMode="numeric" placeholder={`Nhập ${label.toLowerCase()} dòng ${index + 1}`} value={formatMoneyInput(row.amount)} onChange={(event) => updatePaymentRows(kind, (current) => {
+                    const rows = current.length ? current : [{ id: row.id, amount: "" }];
+                    return rows.map((item) => item.id === row.id ? { ...item, amount: cleanMoneyInput(event.target.value) } : item);
+                  })} style={S.paymentInput} />
+                  {paymentDraftRows(kind).length > 1 && <button type="button" onClick={() => updatePaymentRows(kind, (current) => current.filter((item) => item.id !== row.id))} style={S.paymentRemove} aria-label={`Xóa dòng nhập ${label}`}>×</button>}
+                  </div>
+                  <input value={row.note || ""} onChange={(event) => updatePaymentRows(kind, (current) => {
+                    const rows = current.length ? current : [{ id: row.id, amount: "", note: "" }];
+                    return rows.map((item) => item.id === row.id ? { ...item, note: event.target.value } : item);
+                  })} placeholder="Ghi chú dòng này" style={S.paymentRowNote} />
+                </div>
+              ))}
+              <button type="button" onClick={() => updatePaymentRows(kind, (current) => [...(current.length ? current : []), { id: createUuid(), amount: "", note: "" }])} style={S.paymentAdd}>+ Thêm dòng</button>
+              <button type="button" onClick={() => void savePaymentKind(kind)} style={S.paymentSave}>{`Lưu ${label.toLowerCase()}`}</button>
+              <div style={S.paymentSubtotal}>Tổng {label.toLowerCase()}: {paymentTotal(kind).toLocaleString("vi-VN")}đ</div>
+            </div>
+          ))}
+          </div>
+          <div style={S.paymentTotal}>Tổng thanh toán: {(paymentTotal("cash") + paymentTotal("bank")).toLocaleString("vi-VN")}đ</div>
+        </section>
+      )}
+
+      <nav style={S.detailTabs} aria-label="Nội dung chi tiết đơn">
+        <button type="button" onClick={() => setDetailTab("order")} style={{ ...S.detailTab, ...(detailTab === "order" ? S.detailTabActive : {}) }}>Đơn</button>
+        {canViewPayment && <button type="button" onClick={() => setDetailTab("payment")} style={{ ...S.detailTab, ...(detailTab === "payment" ? S.detailTabActive : {}) }}>Thanh toán</button>}
+      </nav>
+
       {/* ===== IMAGE VIEWER ===== */}
 {viewerIndex >= 0 && order.images?.[viewerIndex] && (
-  <div style={S.viewerOverlay}>
+  <div style={{ ...S.viewerOverlay, touchAction: "none" }}>
     <div
       style={S.viewerBackdrop}
       onClick={closeImageViewer}
@@ -985,16 +1241,47 @@ useEffect(() => {
       <CachedImage
         src={viewerImageSrc || order.images[viewerIndex]}
         alt=""
-        style={{ ...S.viewerImg, transform: `scale(${viewerZoom})` }}
+        style={{ ...S.viewerImg, transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})`, touchAction: "none", userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" }}
         onWheel={(event) => {
           event.preventDefault();
-          setViewerZoom((current) => Math.min(4, Math.max(1, current + (event.deltaY < 0 ? 0.2 : -0.2))));
+          updateViewerZoom(viewerZoom + (event.deltaY < 0 ? 0.2 : -0.2));
         }}
         onTouchStart={(event) => {
-          viewerTouchRef.current = event.touches[0]?.clientX ?? null;
+          if (event.touches.length >= 2) {
+            viewerPanGestureRef.current = { mode: "pinch" };
+            viewerTouchRef.current = null;
+            viewerPinchRef.current = { distance: touchDistance(event.touches), zoom: viewerZoom };
+            return;
+          }
+          const touch = event.touches[0];
+          viewerPanGestureRef.current = viewerZoom > 1
+            ? { mode: "pan", startX: touch?.clientX ?? 0, startY: touch?.clientY ?? 0, base: viewerPan }
+            : { mode: "swipe", startX: touch?.clientX ?? null };
+        }}
+        onTouchMove={(event) => {
+          if (event.touches.length < 2 || !viewerPinchRef.current.distance) {
+            const gesture = viewerPanGestureRef.current;
+            if (gesture?.mode !== "pan") return;
+            event.preventDefault();
+            const touch = event.touches[0];
+            setViewerPan({ x: gesture.base.x + touch.clientX - gesture.startX, y: gesture.base.y + touch.clientY - gesture.startY });
+            return;
+          }
+          event.preventDefault();
+          const distance = touchDistance(event.touches);
+          const ratio = distance / viewerPinchRef.current.distance;
+          updateViewerZoom(viewerPinchRef.current.zoom * ratio);
         }}
         onTouchEnd={(event) => {
-          const start = viewerTouchRef.current;
+          if (viewerPinchRef.current.distance) {
+            viewerPinchRef.current = { distance: 0, zoom: viewerZoom };
+            viewerTouchRef.current = null;
+            return;
+          }
+          const gesture = viewerPanGestureRef.current;
+          viewerPanGestureRef.current = null;
+          if (gesture?.mode === "pan") return;
+          const start = gesture?.startX ?? viewerTouchRef.current;
           const end = event.changedTouches[0]?.clientX;
           viewerTouchRef.current = null;
           if (start == null || end == null || Math.abs(end - start) < 45) return;
@@ -1048,7 +1335,7 @@ useEffect(() => {
 )}
 {/* ===== CHAT IMAGE VIEWER ===== */}
 {chatViewer && (
-  <div style={S.viewerOverlay}>
+  <div style={{ ...S.viewerOverlay, touchAction: "none" }}>
     <div
       style={S.viewerBackdrop}
       onClick={closeImageViewer}
@@ -1065,16 +1352,47 @@ useEffect(() => {
       <CachedImage
         src={chatViewerImageSrc || chatViewer.imgs[chatViewer.i]}
         alt=""
-        style={{ ...S.viewerImg, transform: `scale(${chatViewerZoom})` }}
+        style={{ ...S.viewerImg, transform: `translate(${chatViewerPan.x}px, ${chatViewerPan.y}px) scale(${chatViewerZoom})`, touchAction: "none", userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" }}
         onWheel={(event) => {
           event.preventDefault();
-          setChatViewerZoom((current) => Math.min(4, Math.max(1, current + (event.deltaY < 0 ? 0.2 : -0.2))));
+          updateChatViewerZoom(chatViewerZoom + (event.deltaY < 0 ? 0.2 : -0.2));
         }}
         onTouchStart={(event) => {
-          viewerTouchRef.current = event.touches[0]?.clientX ?? null;
+          if (event.touches.length >= 2) {
+            chatViewerPanGestureRef.current = { mode: "pinch" };
+            viewerTouchRef.current = null;
+            viewerPinchRef.current = { distance: touchDistance(event.touches), zoom: chatViewerZoom };
+            return;
+          }
+          const touch = event.touches[0];
+          chatViewerPanGestureRef.current = chatViewerZoom > 1
+            ? { mode: "pan", startX: touch?.clientX ?? 0, startY: touch?.clientY ?? 0, base: chatViewerPan }
+            : { mode: "swipe", startX: touch?.clientX ?? null };
+        }}
+        onTouchMove={(event) => {
+          if (event.touches.length < 2 || !viewerPinchRef.current.distance) {
+            const gesture = chatViewerPanGestureRef.current;
+            if (gesture?.mode !== "pan") return;
+            event.preventDefault();
+            const touch = event.touches[0];
+            setChatViewerPan({ x: gesture.base.x + touch.clientX - gesture.startX, y: gesture.base.y + touch.clientY - gesture.startY });
+            return;
+          }
+          event.preventDefault();
+          const distance = touchDistance(event.touches);
+          const ratio = distance / viewerPinchRef.current.distance;
+          updateChatViewerZoom(viewerPinchRef.current.zoom * ratio);
         }}
         onTouchEnd={(event) => {
-          const start = viewerTouchRef.current;
+          if (viewerPinchRef.current.distance) {
+            viewerPinchRef.current = { distance: 0, zoom: chatViewerZoom };
+            viewerTouchRef.current = null;
+            return;
+          }
+          const gesture = chatViewerPanGestureRef.current;
+          chatViewerPanGestureRef.current = null;
+          if (gesture?.mode === "pan") return;
+          const start = gesture?.startX ?? viewerTouchRef.current;
           const end = event.changedTouches[0]?.clientX;
           viewerTouchRef.current = null;
           if (start == null || end == null || Math.abs(end - start) < 45) return;
@@ -1141,6 +1459,47 @@ const S = {
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis"
+  },
+
+  accountingCheckButton: {
+    border: "1px solid #70ad7b",
+    borderRadius: 18,
+    padding: "6px 11px",
+    background: "#d9f1df",
+    color: "#216b2d",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  accountingCancelButton: {
+    border: "1px solid #d98b8b",
+    borderRadius: 18,
+    padding: "6px 11px",
+    background: "#fff2f2",
+    color: "#a22",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  accountingCancelButtonDone: {
+    opacity: 0.7,
+    cursor: "default",
+  },
+
+  refreshButton: {
+    border: "1px solid #d1aa62",
+    borderRadius: 18,
+    padding: "6px 11px",
+    background: "#fff3d6",
+    color: "#4d3218",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
   },
 
   sub: {
@@ -1334,7 +1693,7 @@ const S = {
 
   inputBar: {
   position: "fixed",
-  bottom: 0,
+  bottom: 58,
   left: 0,
   right: 0,
     background: "#fff7e6",
@@ -1344,6 +1703,94 @@ const S = {
   zIndex: 200,
   display: "block"
 },
+
+  detailTabs: {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 201,
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 6,
+    padding: "6px 8px calc(6px + env(safe-area-inset-bottom))",
+    background: "#fff7e6",
+    borderTop: "1px solid #d8b36a",
+  },
+
+  detailTab: {
+    minHeight: 42,
+    border: "1px solid #d1aa62",
+    borderRadius: 10,
+    background: "#fff3d6",
+    color: "#4d3218",
+    fontSize: 16,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+
+  detailTabActive: {
+    background: "#d3a13f",
+    borderColor: "#a8731f",
+  },
+
+  paymentPanel: {
+    flex: 1,
+    overflowY: "auto",
+    padding: 16,
+    paddingBottom: 76,
+  },
+
+  paymentTitle: {
+    margin: "8px 0 14px",
+    color: "#5b3716",
+  },
+
+  paymentRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "12px 10px",
+    marginBottom: 8,
+    borderRadius: 10,
+    background: "#fffaf0",
+    border: "1px solid #ecd4a4",
+    minWidth: 0,
+    boxSizing: "border-box",
+  },
+
+  paymentStatus: {
+    marginTop: 12,
+    color: "#745b3d",
+    fontWeight: 700,
+  },
+
+  paymentGroup: {
+    display: "grid",
+    gap: 8,
+    padding: 12,
+    marginBottom: 12,
+    borderRadius: 10,
+    background: "#fffaf0",
+    border: "1px solid #ecd4a4",
+    minWidth: 0,
+    boxSizing: "border-box",
+  },
+
+  paymentColumns: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, width: "100%" },
+  paymentEntry: { display: "grid", gap: 5, minWidth: 0 },
+  paymentSavedEntry: { display: "grid", gap: 4, padding: "7px 8px", borderRadius: 8, background: "#f4ead4", border: "1px solid #d9bd83", color: "#5b3716", fontWeight: 700 },
+  paymentSavedLine: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 },
+  paymentDraftLabel: { color: "#745b3d", fontSize: 13, fontWeight: 700, marginTop: 3 },
+  paymentGroupTitle: { minHeight: 22, display: "flex", alignItems: "center", fontSize: 15, lineHeight: 1.15 },
+  paymentLine: { display: "flex", gap: 6, alignItems: "center" },
+  paymentInput: { flex: 1, width: 0, minWidth: 0, boxSizing: "border-box", padding: "9px 8px", borderRadius: 8, border: "1px solid #d1aa62", fontSize: 16 },
+  paymentRowNote: { display: "block", width: "100%", minWidth: 0, minHeight: 42, boxSizing: "border-box", padding: "9px 10px", borderRadius: 7, border: "1px solid #ecd4a4", background: "#fffdf7", fontSize: 16, lineHeight: 1.25 },
+  paymentRemove: { width: 32, height: 32, border: "1px solid #d99", borderRadius: 7, background: "#fff", color: "#a11", fontSize: 20, cursor: "pointer" },
+  paymentAdd: { justifySelf: "start", border: "1px solid #d1aa62", borderRadius: 7, background: "#fff3d6", padding: "6px 9px", cursor: "pointer" },
+  paymentNote: { width: "100%", boxSizing: "border-box", marginTop: 2, padding: "9px 10px", borderRadius: 8, border: "1px solid #d1aa62", fontSize: 16 },
+  paymentSubtotal: { color: "#745b3d", fontSize: 14, fontWeight: 700 },
+  paymentSave: { width: "100%", marginTop: 12, padding: "11px 14px", border: 0, borderRadius: 9, background: "#b98224", color: "#fffaf0", fontSize: 16, fontWeight: 800, cursor: "pointer" },
 
   input: {
     flex: 1,

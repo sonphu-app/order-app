@@ -1,8 +1,9 @@
 import { supabase } from "../supabaseClient";
 import { getCurrentUser } from "./auth";
+import { createUuid } from "./uuid";
 
 const DB_NAME = "sonphu-local-data";
-const DB_VERSION = 3;
+const DB_VERSION = 5;
 const DRAFT_DB_NAME = "sonphu-order-drafts";
 const DRAFT_DB_VERSION = 1;
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -22,6 +23,13 @@ let dbPromise;
 let draftDbPromise;
 const objectUrls = new Map();
 const pendingImageCaches = new Map();
+let orderImageQueueRunning = false;
+
+function notifyLocalSync(event) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("sonphu-local-sync", { detail: event }));
+  }
+}
 
 const LOCAL_STORE_NAMES = [
   "orders",
@@ -31,6 +39,7 @@ const LOCAL_STORE_NAMES = [
   "groupMessages",
   "groupMessageImages",
   "orderEditHistory",
+  "orderImageUploadQueue",
   "orderDrafts",
   "imageBlobs",
   "meta",
@@ -38,14 +47,7 @@ const LOCAL_STORE_NAMES = [
 
 function requestResult(request) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => {
-      const db = request.result;
-      db.onversionchange = () => {
-        db.close();
-        dbPromise = null;
-      };
-      resolve(db);
-    };
+    request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
@@ -67,6 +69,8 @@ export function openLocalDataDB() {
       LOCAL_STORE_NAMES.forEach((name) => {
         if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id" });
       });
+      const imageStore = request.transaction.objectStore("orderImages");
+      if (!imageStore.indexNames.contains("order_id")) imageStore.createIndex("order_id", "order_id", { unique: false });
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -104,11 +108,175 @@ export async function getAllLocal(storeName) {
   return requestResult(tx.objectStore(storeName).getAll());
 }
 
+export async function getLocalById(storeName, id) {
+  if (!id) return null;
+  const db = await openLocalDataDB();
+  const tx = db.transaction(storeName, "readonly");
+  return requestResult(tx.objectStore(storeName).get(id));
+}
+
+export async function getLocalOrderImages(orderId) {
+  if (!orderId) return [];
+  const db = await openLocalDataDB();
+  const tx = db.transaction("orderImages", "readonly");
+  const store = tx.objectStore("orderImages");
+  const request = store.indexNames.contains("order_id")
+    ? store.index("order_id").getAll(orderId)
+    : store.getAll();
+  const rows = await requestResult(request);
+  return store.indexNames.contains("order_id") ? rows : rows.filter((row) => String(row.order_id) === String(orderId));
+}
+
 export async function deleteLocal(storeName, id) {
   const db = await openLocalDataDB();
   const tx = db.transaction(storeName, "readwrite");
   tx.objectStore(storeName).delete(id);
   await transactionDone(tx);
+}
+
+function imageStoragePath(imageUrl) {
+  const marker = "/storage/v1/object/public/order-images/";
+  const value = String(imageUrl || "");
+  const index = value.indexOf(marker);
+  return index < 0 ? null : decodeURIComponent(value.slice(index + marker.length).split("?")[0]);
+}
+
+function stableImageKey(value, index) {
+  let hash = 2166136261;
+  const text = `${index}:${String(value || "")}`;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(16)}-${index}`;
+}
+
+export async function enqueueOrderImageUpload(orderId, images = []) {
+  if (!orderId) return;
+  const normalized = Array.isArray(images) ? images.filter(Boolean) : [];
+  await putLocal("orderImageUploadQueue", {
+    id: `order-image-job:${orderId}`,
+    order_id: orderId,
+    images: normalized,
+    updated_at: new Date().toISOString(),
+    attempts: 0,
+    next_attempt_at: new Date().toISOString(),
+  });
+}
+
+async function processOneOrderImageJob(job) {
+  const desiredImages = Array.isArray(job.images) ? job.images.filter(Boolean) : [];
+  const { data: oldRows, error: oldRowsError } = await supabase
+    .from("order_images")
+    .select("id, image_url")
+    .eq("order_id", job.order_id);
+  if (oldRowsError) throw oldRowsError;
+
+  const desiredRemoteUrls = new Set(desiredImages.filter((image) => !String(image).startsWith("data:")));
+  const savedRows = [];
+  for (let index = 0; index < desiredImages.length; index += 1) {
+    const image = desiredImages[index];
+    if (!String(image).startsWith("data:")) continue;
+    const fileName = `${job.order_id}_${stableImageKey(image, index)}.jpg`;
+    const blob = await (await fetch(image)).blob();
+    const { error: uploadError } = await supabase.storage
+      .from("order-images")
+      .upload(fileName, blob, { upsert: true, contentType: "image/jpeg", cacheControl: "31536000" });
+    if (uploadError) throw uploadError;
+
+    const { data: publicUrlData } = supabase.storage.from("order-images").getPublicUrl(fileName);
+    const imageUrl = publicUrlData.publicUrl;
+    desiredRemoteUrls.add(imageUrl);
+    const alreadySaved = (oldRows || []).some((row) => row.image_url === imageUrl);
+    if (!alreadySaved) {
+      const { data: savedRow, error: rowError } = await supabase
+        .from("order_images")
+        .insert({ order_id: job.order_id, image_url: imageUrl })
+        .select()
+        .single();
+      if (rowError) {
+        const { data: confirmedRows, error: confirmError } = await supabase
+          .from("order_images")
+          .select("id, image_url")
+          .eq("order_id", job.order_id)
+          .eq("image_url", imageUrl);
+        if (confirmError || !confirmedRows?.length) throw rowError;
+        savedRows.push(...confirmedRows);
+      } else if (savedRow) {
+        savedRows.push(savedRow);
+      }
+    } else {
+      savedRows.push(...(oldRows || []).filter((row) => row.image_url === imageUrl));
+    }
+  }
+
+  // Xóa ảnh cũ chỉ sau khi toàn bộ ảnh mới đã được upload và gắn thành công.
+  const obsoleteRows = (oldRows || []).filter((row) => !desiredRemoteUrls.has(row.image_url));
+  if (obsoleteRows.length) {
+    const { error: deleteError } = await supabase
+      .from("order_images")
+      .delete()
+      .in("id", obsoleteRows.map((row) => row.id));
+    if (deleteError) throw deleteError;
+    const oldPaths = obsoleteRows.map((row) => imageStoragePath(row.image_url)).filter(Boolean);
+    if (oldPaths.length) {
+      const { error: storageError } = await supabase.storage.from("order-images").remove(oldPaths);
+      if (storageError) console.log("REMOVE OLD ORDER IMAGES ERROR:", storageError);
+    }
+    for (const row of obsoleteRows) {
+      await deleteLocal("orderImages", row.id);
+      const event = { entityType: "order_image", entityId: row.id, operation: "delete", payload: row };
+      await publishSyncEvent(event);
+      notifyLocalSync(event);
+    }
+  }
+
+  const { data: order, error: orderError } = await supabase
+    .from("orders")
+    .update({ has_image: desiredImages.length > 0 })
+    .eq("id", job.order_id)
+    .select()
+    .single();
+  if (orderError) throw orderError;
+  if (order) {
+    await putLocal("orders", order);
+    const event = { entityType: "order", entityId: order.id, payload: order };
+    await publishSyncEvent(event);
+    notifyLocalSync(event);
+  }
+  for (const row of savedRows) {
+    await putLocal("orderImages", row);
+    const event = { entityType: "order_image", entityId: row.id, payload: row, storagePaths: [imageStoragePath(row.image_url)].filter(Boolean) };
+    await publishSyncEvent(event);
+    notifyLocalSync(event);
+  }
+}
+
+export async function processOrderImageQueue() {
+  if (orderImageQueueRunning || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+  orderImageQueueRunning = true;
+  try {
+    const now = Date.now();
+    const jobs = await getAllLocal("orderImageUploadQueue");
+    for (const job of jobs) {
+      if (new Date(job.next_attempt_at || 0).getTime() > now) continue;
+      try {
+        await processOneOrderImageJob(job);
+        await deleteLocal("orderImageUploadQueue", job.id);
+      } catch (error) {
+        const attempts = Number(job.attempts || 0) + 1;
+        await putLocal("orderImageUploadQueue", {
+          ...job,
+          attempts,
+          last_error: String(error?.message || error || "Không tải được ảnh"),
+          next_attempt_at: new Date(Date.now() + Math.min(5 * 60 * 1000, 2000 * (2 ** Math.min(attempts, 7)))).toISOString(),
+        });
+        console.log("ORDER IMAGE RETRY QUEUED:", job.order_id, error);
+      }
+    }
+  } finally {
+    orderImageQueueRunning = false;
+  }
 }
 
 function openOrderDraftDB() {
@@ -314,7 +482,7 @@ export async function pullSyncEvents(onApplied) {
 
 export function subscribeSyncEvents(onApplied, onStatus) {
   const channel = supabase
-    .channel(`local-sync-${crypto.randomUUID()}`)
+    .channel(`local-sync-${createUuid()}`)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "sync_events" }, async ({ new: event }) => {
       const me = getCurrentUser();
       if (!me?.id || (event.received_by || []).includes(me.id)) return;
