@@ -8,8 +8,12 @@ import { createImagePreviewBlob } from "../utils/imagePreview";
 import { getClipboardImageFiles } from "../utils/clipboardImages";
 import { useNavigate } from "react-router-dom";
 import CachedImage from "../components/CachedImage";
+import MentionTextarea from "../components/MentionTextarea";
+import { notifyMention } from "../utils/mentions";
+import { createUuid } from "../utils/uuid";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
+const MESSAGE_PAGE_SIZE = 40;
 
 function format(ts) {
   return ts ? new Date(ts).toLocaleString() : "";
@@ -18,6 +22,13 @@ function format(ts) {
 function getLocalImageSource(row) {
   const local = String(row?.local_image_url || "");
   return local.startsWith("data:") ? local : row?.image_url;
+}
+
+function touchDistance(touches) {
+  if (!touches || touches.length < 2) return 0;
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
 }
 
 export default function Chat() {
@@ -29,6 +40,7 @@ export default function Chat() {
   const [viewer, setViewer] = useState(null);
   const [viewerImageSrc, setViewerImageSrc] = useState("");
   const [viewerZoom, setViewerZoom] = useState(1);
+  const [viewerPan, setViewerPan] = useState({ x: 0, y: 0 });
   const [groupUnreadCount, setGroupUnreadCount] = useState(0);
 
   const inputRef = useRef(null);
@@ -36,8 +48,17 @@ export default function Chat() {
   const msgListRef = useRef(null);
   const reloadTimerRef = useRef(null);
   const viewerTouchRef = useRef(null);
+  const viewerPinchRef = useRef({ distance: 0, zoom: 1 });
+  const viewerPanGestureRef = useRef(null);
   const imageViewerHistoryRef = useRef(false);
   const realtimeReadyRef = useRef(false);
+  // Chặn việc một UPDATE seen_by đang chờ Realtime phản hồi bị gửi lại
+  // bởi chính effect phụ thuộc vào messages.
+  const seenInFlightRef = useRef(new Set());
+  const oldestMessageRef = useRef(null);
+  const hasOlderMessagesRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const preserveScrollAfterOlderRef = useRef(false);
   const navigate = useNavigate();
 
   const me = getCurrentUser();
@@ -59,6 +80,7 @@ export default function Chat() {
     }
     showViewerImage(images, index);
     setViewerZoom(1);
+    setViewerPan({ x: 0, y: 0 });
     setViewer({ images, index });
   }, [showViewerImage]);
 
@@ -68,6 +90,7 @@ export default function Chat() {
     setViewer(null);
     setViewerImageSrc("");
     setViewerZoom(1);
+    setViewerPan({ x: 0, y: 0 });
     if (wasOpen) window.history.back();
   }, []);
 
@@ -76,8 +99,15 @@ export default function Chat() {
     const nextIndex = Math.max(0, Math.min(viewer.images.length - 1, viewer.index + delta));
     showViewerImage(viewer.images, nextIndex);
     setViewerZoom(1);
+    setViewerPan({ x: 0, y: 0 });
     setViewer({ ...viewer, index: nextIndex });
   }, [showViewerImage, viewer]);
+
+  const updateViewerZoom = (value) => {
+    const next = Math.min(4, Math.max(1, value));
+    setViewerZoom(next);
+    if (next === 1) setViewerPan({ x: 0, y: 0 });
+  };
 
   const getName = (id) => {
     const u = users.find((x) => x.id === id);
@@ -106,7 +136,7 @@ export default function Chat() {
   }, []);
 
   // ===== LOAD CHAT =====
-  const loadChat = useCallback(async ({ remote = true, full = true } = {}) => {
+  const loadChat = useCallback(async ({ remote = true } = {}) => {
     const localMessages = await getAllLocal("groupMessages");
     const localImages = await getAllLocal("groupMessageImages");
     if (localMessages.length > 0) {
@@ -123,17 +153,14 @@ export default function Chat() {
     let messageQuery = supabase
       .from("group_messages")
       .select("*")
-      .order("created_at", { ascending: true });
-    const latestLocalMessageAt = localMessages.reduce((latest, message) => {
-      const value = new Date(message.created_at || 0).getTime();
-      return value > latest ? value : latest;
-    }, 0);
-    if (!full && latestLocalMessageAt > 0) {
-      messageQuery = messageQuery.gt("created_at", new Date(latestLocalMessageAt).toISOString());
-    }
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(MESSAGE_PAGE_SIZE);
     const { data } = await messageQuery;
 
-    const safeData = data || [];
+    const safeData = (data || []).reverse();
+    hasOlderMessagesRef.current = safeData.length >= MESSAGE_PAGE_SIZE;
+    if (safeData.length) oldestMessageRef.current = safeData[0];
     await putManyLocal("groupMessages", safeData);
     const ids = safeData.map((m) => m.id);
 
@@ -152,9 +179,9 @@ export default function Chat() {
 
     }
 
-    const messageMap = new Map((!full ? localMessages : []).map((message) => [String(message.id), message]));
+    const messageMap = new Map(localMessages.map((message) => [String(message.id), message]));
     safeData.forEach((message) => messageMap.set(String(message.id), message));
-    const imageMap = new Map((!full ? localImages : []).map((image) => [String(image.id), image]));
+    const imageMap = new Map(localImages.map((image) => [String(image.id), image]));
     imgs.forEach((image) => imageMap.set(String(image.id), image));
     const allImages = [...imageMap.values()];
     const merged = [...messageMap.values()].map((m) => ({
@@ -165,6 +192,54 @@ export default function Chat() {
     })).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
     setMessages(merged);
+  }, []);
+
+  const loadOlderMessages = useCallback(async () => {
+    const cursor = oldestMessageRef.current;
+    if (loadingOlderRef.current || !hasOlderMessagesRef.current || !cursor) return;
+    loadingOlderRef.current = true;
+    const previousHeight = msgListRef.current?.scrollHeight || 0;
+    try {
+      const { data, error } = await supabase
+        .from("group_messages")
+        .select("*")
+        .or(`created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(MESSAGE_PAGE_SIZE);
+      if (error) throw error;
+      const olderRows = (data || []).reverse();
+      hasOlderMessagesRef.current = olderRows.length >= MESSAGE_PAGE_SIZE;
+      if (!olderRows.length) return;
+      oldestMessageRef.current = olderRows[0];
+      await putManyLocal("groupMessages", olderRows);
+      const ids = olderRows.map((message) => message.id);
+      const { data: imgData, error: imgError } = ids.length
+        ? await supabase.from("group_message_images").select("*").in("message_id", ids)
+        : { data: [], error: null };
+      if (!imgError && imgData?.length) await putManyLocal("groupMessageImages", imgData);
+      const localImages = await getAllLocal("groupMessageImages");
+      const imageMap = new Map(localImages.map((image) => [String(image.id), image]));
+      const olderMessages = olderRows.map((message) => ({
+        ...message,
+        images: [...imageMap.values()]
+          .filter((image) => String(image.message_id) === String(message.id))
+          .map(getLocalImageSource),
+      }));
+      preserveScrollAfterOlderRef.current = true;
+      setMessages((current) => {
+        const merged = new Map(current.map((message) => [String(message.id), message]));
+        olderMessages.forEach((message) => merged.set(String(message.id), message));
+        return [...merged.values()].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      });
+      requestAnimationFrame(() => {
+        if (msgListRef.current) msgListRef.current.scrollTop += msgListRef.current.scrollHeight - previousHeight;
+      });
+    } catch (error) {
+      console.log("LOAD OLDER GROUP MESSAGES ERROR:", error);
+    } finally {
+      loadingOlderRef.current = false;
+    }
   }, []);
 
   // ===== LOAD UNREAD =====
@@ -215,6 +290,9 @@ export default function Chat() {
             await deleteLocal("groupMessages", payload.old.id);
             setMessages((current) => current.filter((message) => message.id !== payload.old.id));
           } else {
+            if (payload.eventType === "INSERT" && payload.new?.sender_id !== getCurrentUser()?.id) {
+              notifyMention({ id: `group-message-${payload.new.id}`, text: payload.new.text, title: "Chat nhóm có tag bạn", body: "Có tin nhắn nhóm nhắc đến bạn" });
+            }
             await putLocal("groupMessages", payload.new);
             setMessages((current) => {
               const optimistic = current.find((message) =>
@@ -262,12 +340,12 @@ export default function Chat() {
 
   // iOS và mạng yếu: giữ một nhịp đồng bộ dự phòng nếu kênh Realtime bị ngắt.
   useEffect(() => {
-    const refresh = (force = false) => {
-      if ((!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
-      loadChat({ full: force });
+    const refresh = () => {
+      if (realtimeReadyRef.current || document.visibilityState !== "visible") return;
+      loadChat();
       loadUnread();
     };
-    const onFocus = () => refresh(true);
+    const onFocus = refresh;
     const timer = window.setInterval(refresh, 60000);
     window.addEventListener("focus", onFocus);
     return () => {
@@ -286,7 +364,11 @@ export default function Chat() {
   }, [loadChat]);
 
   // ===== AUTO SCROLL WHEN MESSAGES CHANGE =====
-  useEffect(() => {
+useEffect(() => {
+    if (preserveScrollAfterOlderRef.current) {
+      preserveScrollAfterOlderRef.current = false;
+      return;
+    }
     scrollToBottom(false);
   }, [messages, scrollToBottom]);
 
@@ -318,14 +400,23 @@ export default function Chat() {
 
     const run = async () => {
       for (const m of messages) {
-        if (m.sender_id !== me.id && !(m.seen_by || []).includes(me.id)) {
-          await supabase
-            .from("group_messages")
-            .update({
-              seen_by: [...(m.seen_by || []), me.id]
-            })
-            .eq("id", m.id);
+        if (m.sender_id === me.id || (m.seen_by || []).includes(me.id) || seenInFlightRef.current.has(m.id)) continue;
+        seenInFlightRef.current.add(m.id);
+        const seenBy = [...(m.seen_by || []), me.id];
+        const { error } = await supabase
+          .from("group_messages")
+          .update({ seen_by: seenBy })
+          .eq("id", m.id);
+        if (error) {
+          seenInFlightRef.current.delete(m.id);
+          continue;
         }
+        // Cập nhật cục bộ ngay sau khi ghi thành công để effect không phải
+        // chờ Realtime event mới; badge vẫn được tính lại như trước.
+        setMessages((current) => current.map((message) => String(message.id) === String(m.id)
+          ? { ...message, seen_by: seenBy }
+          : message));
+        seenInFlightRef.current.delete(m.id);
       }
       loadUnread();
     };
@@ -342,7 +433,7 @@ export default function Chat() {
 
     const sendingText = text.trim();
     const sendingAttachments = [...attachments];
-    const optimisticId = `local-${crypto.randomUUID()}`;
+    const optimisticId = `local-${createUuid()}`;
 
     setMessages((current) => [...current, {
       id: optimisticId,
@@ -483,6 +574,9 @@ export default function Chat() {
       <div
         className="msgList"
         ref={msgListRef}
+        onScroll={(event) => {
+          if (event.currentTarget.scrollTop <= 48) void loadOlderMessages();
+        }}
         onClick={() => scrollToBottom(true)}
       >
         {messages.map((m) => {
@@ -528,14 +622,12 @@ export default function Chat() {
         <div className="previewRow">
           {attachments.map((img, i) => (
             <div key={i} className="previewBox">
-              <CachedImage src={img} alt="" />
-              <button
-                type="button"
-                className="previewEdit"
+              <CachedImage
+                src={img}
+                alt=""
                 onClick={() => setEditingIndex(i)}
-              >
-                Sửa
-              </button>
+                style={{ cursor: "pointer" }}
+              />
               <button
                 className="previewRemove"
                 onClick={() =>
@@ -550,8 +642,9 @@ export default function Chat() {
       )}
 
       <div className="composer">
-        <textarea
-          ref={inputRef}
+        <MentionTextarea
+          inputRef={inputRef}
+          users={users}
           value={text}
           rows={1}
           placeholder="Nhập tin nhắn..."
@@ -621,16 +714,47 @@ export default function Chat() {
             src={viewerImageSrc || viewer.images[viewer.index]}
             className="viewerImg"
             alt=""
-            style={{ transform: `scale(${viewerZoom})` }}
+            style={{ transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})` }}
             onWheel={(event) => {
               event.preventDefault();
-              setViewerZoom((current) => Math.min(4, Math.max(1, current + (event.deltaY < 0 ? 0.2 : -0.2))));
+              updateViewerZoom(viewerZoom + (event.deltaY < 0 ? 0.2 : -0.2));
             }}
             onTouchStart={(event) => {
-              viewerTouchRef.current = event.touches[0]?.clientX ?? null;
+              if (event.touches.length >= 2) {
+                viewerPanGestureRef.current = { mode: "pinch" };
+                viewerTouchRef.current = null;
+                viewerPinchRef.current = { distance: touchDistance(event.touches), zoom: viewerZoom };
+                return;
+              }
+              const touch = event.touches[0];
+              viewerPanGestureRef.current = viewerZoom > 1
+                ? { mode: "pan", startX: touch?.clientX ?? 0, startY: touch?.clientY ?? 0, base: viewerPan }
+                : { mode: "swipe", startX: touch?.clientX ?? null };
+            }}
+            onTouchMove={(event) => {
+              if (event.touches.length < 2 || !viewerPinchRef.current.distance) {
+                const gesture = viewerPanGestureRef.current;
+                if (gesture?.mode !== "pan") return;
+                event.preventDefault();
+                const touch = event.touches[0];
+                setViewerPan({ x: gesture.base.x + touch.clientX - gesture.startX, y: gesture.base.y + touch.clientY - gesture.startY });
+                return;
+              }
+              event.preventDefault();
+              const distance = touchDistance(event.touches);
+              const ratio = distance / viewerPinchRef.current.distance;
+              updateViewerZoom(viewerPinchRef.current.zoom * ratio);
             }}
             onTouchEnd={(event) => {
-              const start = viewerTouchRef.current;
+              if (viewerPinchRef.current.distance) {
+                viewerPinchRef.current = { distance: 0, zoom: viewerZoom };
+                viewerTouchRef.current = null;
+                return;
+              }
+              const gesture = viewerPanGestureRef.current;
+              viewerPanGestureRef.current = null;
+              if (gesture?.mode === "pan") return;
+              const start = gesture?.startX ?? viewerTouchRef.current;
               const end = event.changedTouches[0]?.clientX;
               viewerTouchRef.current = null;
               if (start == null || end == null || Math.abs(end - start) < 45) return;

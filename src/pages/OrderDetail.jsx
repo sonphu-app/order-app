@@ -22,6 +22,7 @@ import { createUuid } from "../utils/uuid";
 import { cleanMoneyInput, formatMoneyInput, parseMoneyInput } from "../utils/moneyInput";
 
 const ImageEditor = lazy(() => import("../components/ImageEditor"));
+const MESSAGE_PAGE_SIZE = 40;
 
 function getLocalImageSource(row) {
   const local = String(row?.local_image_url || "");
@@ -50,12 +51,16 @@ const getName = (id) => {
   const navigate = useNavigate();
   const location = useLocation();
   const me = getCurrentUser();
+  const detailTabKey = `sonphu-order-detail-tab:${id}`;
 
   const [order, setOrder] = useState(null);
 const bodyRef = useRef(null);
 const inputRef = useRef(null);
 const realtimeReadyRef = useRef(false);
 const initialChatScrollRef = useRef(false);
+const oldestMessageRef = useRef(null);
+const hasOlderMessagesRef = useRef(true);
+const loadingOlderRef = useRef(false);
 const [images, setImages] = useState([]);
 
 function sameImageList(left = [], right = []) {
@@ -70,11 +75,24 @@ function sameImageList(left = [], right = []) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [accountingChecking, setAccountingChecking] = useState(false);
-  const [detailTab, setDetailTab] = useState("order");
+  const [detailTab, setDetailTab] = useState(() => {
+    const requested = location.state?.detailTab;
+    if (requested === "payment" || requested === "order") return requested;
+    try {
+      const saved = sessionStorage.getItem(detailTabKey);
+      return saved === "payment" || saved === "order" ? saved : "order";
+    } catch {
+      return "order";
+    }
+  });
   const [paymentBreakdown, setPaymentBreakdown] = useState({ cash: [], bank: [], note: "" });
   const [paymentDraft, setPaymentDraft] = useState({ cash: [{ id: "cash-draft", amount: "", note: "" }], bank: [{ id: "bank-draft", amount: "", note: "" }] });
   const [editingPaymentNote, setEditingPaymentNote] = useState(null);
   const [editingPaymentNoteValue, setEditingPaymentNoteValue] = useState("");
+
+  useEffect(() => {
+    try { sessionStorage.setItem(detailTabKey, detailTab); } catch { /* storage không bắt buộc */ }
+  }, [detailTab, detailTabKey]);
 
   // IMAGE VIEWER (AN TOÀN)
   const [viewerIndex, setViewerIndex] = useState(-1); // -1 = đóng
@@ -224,7 +242,7 @@ const scrollToLatestOnce = () => {
 };
 
 /* ================= LOAD CHAT ================= */
-async function loadChat({ remote = true, full = true } = {}) {
+async function loadChat({ remote = true } = {}) {
   const localMessages = (await getAllLocal("orderMessages"))
     .filter((message) => String(message.order_id) === String(id));
   const localMessageImages = await getAllLocal("orderMessageImages");
@@ -245,23 +263,21 @@ async function loadChat({ remote = true, full = true } = {}) {
     .from("order_messages")
     .select("*")
     .eq("order_id", id)
-    .order("created_at", { ascending: true });
-  const latestLocalMessageAt = localMessages.reduce((latest, message) => {
-    const value = new Date(message.created_at || 0).getTime();
-    return value > latest ? value : latest;
-  }, 0);
-  if (!full && latestLocalMessageAt > 0) {
-    messageQuery = messageQuery.gt("created_at", new Date(latestLocalMessageAt).toISOString());
-  }
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(MESSAGE_PAGE_SIZE);
   const { data: msgs, error: msgErr } = await messageQuery;
 
   if (msgErr) {
     console.log("LOAD MSG ERROR:", msgErr);
     if (localMessages.length === 0) return;
   }
-  await putManyLocal("orderMessages", msgs || []);
+  const pageRows = (msgs || []).reverse();
+  hasOlderMessagesRef.current = pageRows.length >= MESSAGE_PAGE_SIZE;
+  if (pageRows.length) oldestMessageRef.current = pageRows[0];
+  await putManyLocal("orderMessages", pageRows);
 
-  const msgIds = (msgs || []).map((m) => m.id);
+  const msgIds = pageRows.map((m) => m.id);
   let imgs = [];
 
   if (msgIds.length > 0) {
@@ -283,10 +299,10 @@ async function loadChat({ remote = true, full = true } = {}) {
     }
   }
 
-  const messageMap = new Map((msgErr || !full ? localMessages : [])
+  const messageMap = new Map(localMessages
     .map((message) => [String(message.id), message]));
-  (msgs || []).forEach((message) => messageMap.set(String(message.id), message));
-  const imageMap = new Map((msgErr || !full ? localMessageImages : [])
+  pageRows.forEach((message) => messageMap.set(String(message.id), message));
+  const imageMap = new Map(localMessageImages
     .map((image) => [String(image.id), image]));
   imgs.forEach((image) => imageMap.set(String(image.id), image));
   const allImages = [...imageMap.values()];
@@ -299,6 +315,54 @@ async function loadChat({ remote = true, full = true } = {}) {
 
   setMessages(merged);
   scrollToLatestOnce();
+}
+
+async function loadOlderMessages() {
+  const cursor = oldestMessageRef.current;
+  if (loadingOlderRef.current || !hasOlderMessagesRef.current || !cursor) return;
+  loadingOlderRef.current = true;
+  const previousHeight = bodyRef.current?.scrollHeight || 0;
+  try {
+    const { data, error } = await supabase
+      .from("order_messages")
+      .select("*")
+      .eq("order_id", id)
+      .or(`created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(MESSAGE_PAGE_SIZE);
+    if (error) throw error;
+    const olderRows = (data || []).reverse();
+    hasOlderMessagesRef.current = olderRows.length >= MESSAGE_PAGE_SIZE;
+    if (!olderRows.length) return;
+    oldestMessageRef.current = olderRows[0];
+    await putManyLocal("orderMessages", olderRows);
+    const ids = olderRows.map((message) => message.id);
+    const { data: imgRows, error: imgError } = ids.length
+      ? await supabase.from("order_message_images").select("*").in("message_id", ids)
+      : { data: [], error: null };
+    if (!imgError && imgRows?.length) await putManyLocal("orderMessageImages", imgRows);
+    const localImages = await getAllLocal("orderMessageImages");
+    const imageMap = new Map(localImages.map((image) => [String(image.id), image]));
+    const olderMessages = olderRows.map((message) => ({
+      ...message,
+      images: [...imageMap.values()]
+        .filter((image) => String(image.message_id) === String(message.id))
+        .map(getLocalImageSource),
+    }));
+    setMessages((current) => {
+      const merged = new Map(current.map((message) => [String(message.id), message]));
+      olderMessages.forEach((message) => merged.set(String(message.id), message));
+      return [...merged.values()].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    });
+    requestAnimationFrame(() => {
+      if (bodyRef.current) bodyRef.current.scrollTop += bodyRef.current.scrollHeight - previousHeight;
+    });
+  } catch (error) {
+    console.log("LOAD OLDER ORDER MESSAGES ERROR:", error);
+  } finally {
+    loadingOlderRef.current = false;
+  }
 }
 
 async function loadEditHistory() {
@@ -436,12 +500,12 @@ useEffect(() => {
 }, [id]);
 
 useEffect(() => {
-  const refresh = (force = false) => {
-    if ((!force && realtimeReadyRef.current) || document.visibilityState !== "visible") return;
+  const refresh = () => {
+    if (realtimeReadyRef.current || document.visibilityState !== "visible") return;
     loadOrder();
-    loadChat({ full: force });
+    loadChat();
   };
-  const onFocus = () => refresh(true);
+  const onFocus = refresh;
   const timer = window.setInterval(refresh, 60000);
   window.addEventListener("focus", onFocus);
   return () => {
@@ -969,6 +1033,9 @@ useEffect(() => {
         style={S.body}
         hidden={detailTab !== "order"}
         ref={bodyRef}
+        onScroll={(event) => {
+          if (event.currentTarget.scrollTop <= 48) void loadOlderMessages();
+        }}
       >
 
         {/* ===== ORDER CONTENT ===== */}
