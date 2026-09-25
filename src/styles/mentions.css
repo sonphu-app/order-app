@@ -1,0 +1,19 @@
+.mentionField { position:relative; min-width:0; flex:1 1 auto; }
+.mentionField > textarea {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  min-height: 44px;
+  max-height: 126px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  resize: none;
+  field-sizing: content;
+}
+@supports (field-sizing: content) {
+  .mentionField > textarea { height: auto; }
+}
+.mentionSuggestions { position:absolute; z-index:50; left:0; right:0; bottom:calc(100% + 6px); display:flex; flex-direction:column; max-height:180px; overflow:auto; padding:4px; border:1px solid #d1aa62; border-radius:8px; background:#fffaf0; box-shadow:0 4px 14px rgba(70,40,10,.18); }
+.mentionSuggestions button { border:0; border-radius:6px; padding:8px 10px; background:transparent; color:#5b3716; text-align:left; cursor:pointer; }
+.mentionSuggestions button:hover { background:#fff0c9; }
