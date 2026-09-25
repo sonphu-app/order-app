@@ -219,3 +219,20 @@ export async function notifyGroupChat({ text, imageCount = 0 }) {
     url: `/chat`,
   });
 }
+
+export async function notifyScaleWeighing({ weighingId, plate, charge }) {
+  const me = getCurrentUser();
+  if (!me?.id) return null;
+  const senderName = me.name || me.username || "Không rõ";
+  const normalizedCharge = Math.max(0, Number(charge) || 0).toLocaleString("vi-VN");
+  return sendPushEvent({
+    type: "scale_weighing",
+    actorId: me.id,
+    actorName: senderName,
+    includeActor: true,
+    title: `⚖️ ${senderName} vừa cân xe ${plate || "chưa có biển số"}`,
+    body: `Tiền cân: ${normalizedCharge}đ`,
+    url: "/scale",
+    notificationId: `scale_${weighingId || Date.now()}_${Date.now()}`,
+  });
+}
