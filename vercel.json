@@ -1,7 +1,7 @@
 {
   "headers": [
     {
-      "source": "/(.*\\.(html|json))",
+      "source": "/index.html",
       "headers": [
         { "key": "Cache-Control", "value": "no-store, max-age=0, must-revalidate" }
       ]
@@ -14,6 +14,6 @@
     }
   ],
   "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+    { "source": "/:path*", "destination": "/index.html" }
   ]
 }
